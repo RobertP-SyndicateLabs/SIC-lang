@@ -4,9 +4,21 @@ import (
     "fmt"
     "io/ioutil"
     "os"
+    "strings"
 
     "github.com/RobertP-SyndicateLabs/SIC-lang/compiler"
 )
+
+func findCommand(args []string) (string, int) {
+    // Skip path-like arguments: /something/something OR ./something
+    for i, a := range args {
+        if strings.HasPrefix(a, "/") || strings.HasPrefix(a, "./") {
+            continue
+        }
+        return a, i
+    }
+    return "", -1
+}
 
 func main() {
     if len(os.Args) < 2 {
@@ -14,19 +26,28 @@ func main() {
         os.Exit(1)
     }
 
-    cmd := os.Args[1]
+    cmd, idx := findCommand(os.Args[1:])
+    if idx == -1 {
+        fmt.Println("no valid command found")
+        os.Exit(1)
+    }
+
+    // real arguments start AFTER the command
+    args := os.Args[1+idx+1:]
 
     switch cmd {
     case "build":
-        doBuild(os.Args[2:])
+        doBuild(args)
     case "run":
-        doRun(os.Args[2:])
+        doRun(args)
     case "fmt":
-        doFmt(os.Args[2:])
+        doFmt(args)
     case "analyze":
-        doAnalyze(os.Args[2:])
+        doAnalyze(args)
     case "lex":
-        doLex(os.Args[2:])
+        doLex(args)
+    case "parse":
+        doParse(args)
     default:
         fmt.Println("unknown command:", cmd)
         os.Exit(1)
@@ -78,4 +99,25 @@ func doLex(args []string) {
             break
         }
     }
+}
+
+func doParse(args []string) {
+    if len(args) == 0 {
+        fmt.Println("usage: sic parse <file.sic>")
+        os.Exit(1)
+    }
+
+    filename := args[0]
+    data, err := ioutil.ReadFile(filename)
+    if err != nil {
+        fmt.Println("error reading file:", err)
+        os.Exit(1)
+    }
+
+    src := string(data)
+    lx := compiler.NewLexer(src, filename)
+    p := compiler.NewParser(lx)
+
+    program := p.ParseProgram()
+    p.PrintProgram(program)
 }
