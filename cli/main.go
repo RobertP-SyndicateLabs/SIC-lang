@@ -117,7 +117,23 @@ func doParse(args []string) {
     src := string(data)
     lx := compiler.NewLexer(src, filename)
     p := compiler.NewParser(lx)
+    prog := p.ParseProgram()
 
-    program := p.ParseProgram()
-    p.PrintProgram(program)
+    if errs := p.Errors(); len(errs) > 0 {
+        fmt.Println("Parser reported errors:")
+        for _, e := range errs {
+            fmt.Println("  -", e)
+        }
+        os.Exit(1)
+    }
+
+    fmt.Println("== SIC PROGRAM ==")
+    fmt.Println("Language:", prog.Language)
+    fmt.Println("Scroll:", prog.Scroll)
+    fmt.Println("Mode:", prog.Mode)
+    fmt.Println("Profile:", prog.Profile)
+    fmt.Println("Works:")
+    for _, w := range prog.Works {
+        fmt.Printf("  - %s (tokens in body: %d)\n", w.Name, len(w.Body))
+    }
 }
