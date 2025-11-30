@@ -59,7 +59,17 @@ func doBuild(args []string) {
 }
 
 func doRun(args []string) {
-    fmt.Println("[SIC] run is not implemented yet.")
+    if len(args) == 0 {
+        fmt.Println("usage: sic run <file.sic>")
+        os.Exit(1)
+    }
+
+    filename := args[0]
+
+    if err := compiler.RunFile(filename); err != nil {
+        fmt.Fprintln(os.Stderr, "[SIC] runtime error:", err)
+        os.Exit(1)
+    }
 }
 
 func doFmt(args []string) {

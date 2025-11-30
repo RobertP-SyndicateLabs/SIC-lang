@@ -1,0 +1,17 @@
+LANGUAGE "SIC 1.0".
+SCROLL STRONG arcwork_scroll
+MODE CHANT.
+PROFILE "CIVIL"
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+    SAY: "Entering ARCWORK demo.".
+
+    LET SIGIL counter BE "0".
+
+    ARCWORK:
+        RAISE SIGIL counter BY 3.
+        LOWER SIGIL counter BY 1.
+    ENDARCWORK.
+
+    THUS WE ANSWER WITH "Counter is " + counter + ".".
+ENDWORK

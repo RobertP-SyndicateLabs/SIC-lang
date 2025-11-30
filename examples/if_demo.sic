@@ -1,0 +1,18 @@
+LANGUAGE "SIC 1.0".
+SCROLL STRONG if_demo
+MODE CHANT.
+PROFILE "CIVIL"
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+    SAY: "Entering IF demo.".
+
+    LET SIGIL name BE "World".
+
+    IF SIGIL name EQUALS "World" THEN:
+        SAY: "Condition matched.".
+        THUS WE ANSWER WITH "Hello, " + SIGIL name + "!".
+    ELSE:
+        SAY: "Condition did not match.".
+        THUS WE ANSWER WITH "Goodbye.".
+    END.
+ENDWORK

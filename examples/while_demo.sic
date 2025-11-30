@@ -1,0 +1,26 @@
+LANGUAGE "SIC 1.0".
+SCROLL STRONG while_scroll
+MODE CHANT.
+PROFILE "CIVIL"
+
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+    SAY: "Entering WHILE demo.".
+
+    LET SIGIL flag BE "go".
+    LET SIGIL counter BE "0".
+
+    WHILE SIGIL flag EQUALS "go":
+        SAY: "Loop turn " + counter + ".".
+
+        ARCWORK:
+            RAISE SIGIL counter BY 1.
+        ENDARCWORK
+
+        IF SIGIL counter EQUALS "3" THEN:
+            LET SIGIL flag BE "stop".
+        END.
+    ENDWHILE.
+
+    THUS WE ANSWER WITH "WHILE demo complete.".
+ENDWORK

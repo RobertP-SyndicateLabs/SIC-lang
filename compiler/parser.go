@@ -2,7 +2,7 @@ package compiler
 
 import "fmt"
 
-// -------- AST TYPES --------
+// ===== AST TYPES =====
 
 type Program struct {
 	Language string
@@ -12,13 +12,25 @@ type Program struct {
 	Works    []*WorkDecl
 }
 
+// WorkDecl represents a WORK block.
+//
+// Example headers:
+//
+//	WORK MAIN WITH SIGIL UNUSED AS TEXT:
+//	WORK GREETING WITH SIGIL name AS TEXT:
+//
+// We currently only care about:
+//   - Name
+//   - Any SIGIL parameter names in the header (e.g. "name")
 type WorkDecl struct {
-	Name  string
-	Start Token   // where WORK was seen
-	Body  []Token // raw tokens between WORK and ENDWORK (for now)
+	Name        string
+	Start       Token
+	Body        []Token
+	SigilParams []string // names of SIGIL parameters in header, in order
+        Ephemeral   bool // true if declared as WORK EPHEMERAL
 }
 
-// -------- PARSER CORE --------
+// ===== PARSER CORE =====
 
 type Parser struct {
 	l         *Lexer
@@ -29,7 +41,7 @@ type Parser struct {
 
 func NewParser(l *Lexer) *Parser {
 	p := &Parser{l: l}
-	// Load two tokens so cur/peek are valid.
+	// prime cur/peek
 	p.nextToken()
 	p.nextToken()
 	return p
@@ -54,68 +66,84 @@ func (p *Parser) skipNewlines() {
 	}
 }
 
-// -------- TOP-LEVEL PARSE --------
+// ===== TOP-LEVEL PARSE =====
 
 func (p *Parser) ParseProgram() *Program {
 	prog := &Program{}
 
 	for p.curToken.Type != TOK_EOF {
 		switch p.curToken.Type {
+		case TOK_NEWLINE:
+			p.nextToken()
+			continue
+
 		case TOK_LANGUAGE:
 			p.parseLanguage(prog)
+
 		case TOK_SCROLL:
 			p.parseScroll(prog)
+
 		case TOK_MODE:
 			p.parseMode(prog)
+
 		case TOK_PROFILE:
 			p.parseProfile(prog)
+
 		case TOK_WORK:
 			w := p.parseWork()
 			if w != nil {
 				prog.Works = append(prog.Works, w)
 			}
+
 		default:
-			// Just advance over things we don't care about yet (DOT, NEWLINE, etc.).
+			// Unknown / not-yet-handled token at top level:
+			// just advance to avoid infinite loop.
 		}
+
 		p.nextToken()
 	}
 
 	return prog
 }
 
-// -------- HEADER HELPERS --------
+// ===== HEADER HELPERS =====
 
+// LANGUAGE "SIC 1.0".
 func (p *Parser) parseLanguage(prog *Program) {
-	// LANGUAGE "SIC 1.0".
+	// curToken is TOK_LANGUAGE
 	p.nextToken()
 	if p.curToken.Type == TOK_STRING {
 		prog.Language = p.curToken.Lexeme
 	} else {
 		p.addError("expected STRING after LANGUAGE, got %s", p.curToken.Type)
 	}
+	// optional trailing DOT is ignored by parser; lexer already emitted it.
 }
 
+// SCROLL STRONG hello_scroll
+// SCROLL hello_scroll
 func (p *Parser) parseScroll(prog *Program) {
-	// SCROLL STRONG hello_scroll
-	p.nextToken() // maybe STRONG / SOFT (ignore for now)
-	if p.curToken.Type == TOK_IDENT {
-		// could be mode (STRONG) OR scroll name if no strength keyword exists
-		// look ahead one to see if there's another IDENT
-		if p.peekToken.Type == TOK_IDENT {
-			// STRONG hello_scroll -> take second ident as name
-			p.nextToken()
-			prog.Scroll = p.curToken.Lexeme
-		} else {
-			// SCROLL hello_scroll
-			prog.Scroll = p.curToken.Lexeme
-		}
-	} else {
+	// curToken is TOK_SCROLL
+	p.nextToken() // move to possible strength or name
+
+	if p.curToken.Type != TOK_IDENT {
 		p.addError("expected IDENT after SCROLL, got %s", p.curToken.Type)
+		return
+	}
+
+	// If we see SCROLL STRONG/WEAK foo, treat the *second* IDENT as the name.
+	if p.peekToken.Type == TOK_IDENT {
+		// strength (ignored for now)
+		p.nextToken() // now at scroll name
+		prog.Scroll = p.curToken.Lexeme
+	} else {
+		// SCROLL foo
+		prog.Scroll = p.curToken.Lexeme
 	}
 }
 
+// MODE CHANT.
 func (p *Parser) parseMode(prog *Program) {
-	// MODE CHANT
 	p.nextToken()
 	if p.curToken.Type == TOK_IDENT {
 		prog.Mode = p.curToken.Lexeme
@@ -124,8 +152,8 @@ func (p *Parser) parseMode(prog *Program) {
 	}
 }
 
+// PROFILE "CIVIL"
 func (p *Parser) parseProfile(prog *Program) {
-	// PROFILE "CIVIL"
 	p.nextToken()
 	if p.curToken.Type == TOK_STRING || p.curToken.Type == TOK_IDENT {
 		prog.Profile = p.curToken.Lexeme
@@ -134,30 +162,96 @@ func (p *Parser) parseProfile(prog *Program) {
 	}
 }
 
-// -------- WORK PARSING --------
+// ===== WORK PARSING =====
+//
+// Handles both:
+//
+//   WORK MAIN WITH SIGIL UNUSED AS TEXT:
+//   WORK GREETING WITH SIGIL name AS TEXT:
+//
+// We scan the header until the COLON. Any "SIGIL <ident>" pair in the header
+// is recorded as a sigil parameter name, *except* that we don't special-case
+// "UNUSED" here (it just becomes a param name, which is harmless for MAIN).
+
+// Accept anything that can act as a SIGIL parameter name in a WORK header
+func isSigilNameToken(t Token) bool {
+	switch t.Type {
+	case TOK_IDENT:
+		return true
+	case TOK_STRING:
+		return true
+	case TOK_UNUSED:
+		return true
+	default:
+		return false
+	}
+}
 
 func (p *Parser) parseWork() *WorkDecl {
-	// WORK MAIN WITH SIGIL UNUSED AS TEXT:
 	w := &WorkDecl{
 		Start: p.curToken,
 	}
 
-	// Next token should be the work name.
+	// Move to the token after WORK.
 	p.nextToken()
+
+	// Optional EPHEMERAL marker:
+	//   WORK EPHEMERAL MAIN WITH SIGIL ...
+	// vs
+	//   WORK MAIN WITH SIGIL ...
+	if p.curToken.Type == TOK_EPHEMERAL {
+		w.Ephemeral = true
+		p.nextToken()
+	}
+
+	// Expect the work name.
 	if p.curToken.Type != TOK_IDENT {
 		p.addError("expected IDENT after WORK, got %s", p.curToken.Type)
 		return nil
 	}
 	w.Name = p.curToken.Lexeme
 
-	// Now collect everything until ENDWORK into Body.
+	// Scan the header until COLON, capturing "SIGIL <ident>" pairs.
 	for {
 		p.nextToken()
-		if p.curToken.Type == TOK_EOF || p.curToken.Type == TOK_ENDWORK {
-			break
+
+		switch p.curToken.Type {
+		case TOK_COLON:
+			// end of header
+			goto bodyStart
+
+		case TOK_EOF:
+			p.addError("unexpected EOF in WORK header for %s", w.Name)
+			return nil
+
+		case TOK_ENDWORK:
+			p.addError("unexpected ENDWORK in WORK header for %s", w.Name)
+			return nil
+
+		case TOK_SIGIL:
+			p.nextToken()
+			if !isSigilNameToken(p.curToken) {
+				p.addError("expected SIGIL name after SIGIL in WORK %s, got %s",
+					w.Name, p.curToken.Type)
+				return nil
+			}
+			w.SigilParams = append(w.SigilParams, p.curToken.Lexeme)
+
+		default:
+			// Ignore other header tokens (WITH, AS, TEXT, etc.) for now.
 		}
-		w.Body = append(w.Body, p.curToken)
 	}
 
+bodyStart:
+	// We're currently *at* the COLON. Move to first body token.
+	p.nextToken()
+
+	// Collect body tokens until ENDWORK or EOF.
+	for p.curToken.Type != TOK_EOF && p.curToken.Type != TOK_ENDWORK {
+		w.Body = append(w.Body, p.curToken)
+		p.nextToken()
+	}
+
+	// ParseProgram's main loop will see TOK_ENDWORK and advance beyond it.
 	return w
 }

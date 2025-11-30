@@ -1,0 +1,23 @@
+LANGUAGE "SIC 1.0".
+SCROLL STRONG falls_scroll
+MODE CHANT.
+PROFILE "CIVIL"
+
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+    SAY: "Entering FALLS_TO_RUIN demo.".
+
+    LET SIGIL gold BE "100".
+
+    OMEN "bad_luck":
+        ARCWORK:
+            RAISE SIGIL gold BY 50.
+        ENDARCWORK
+
+        RAISE OMEN "bad_luck".
+    FALLS_TO_RUIN:
+        SAY: "An omen struck; rolling back.".
+    ENDOMEN.
+
+    SAY: "Gold after OMEN is " + gold + ".".
+ENDWORK

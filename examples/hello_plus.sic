@@ -1,0 +1,10 @@
+LANGUAGE "SIC 1.0".
+SCROLL STRONG hello_plus
+MODE CHANT.
+PROFILE "CIVIL"
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+    SAY: "Entering MAIN.".
+    LET SIGIL name BE "World".
+    THUS WE ANSWER WITH "Hello, " + name + "!".
+ENDWORK

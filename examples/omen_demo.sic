@@ -1,0 +1,18 @@
+LANGUAGE "SIC 1.0".
+SCROLL STRONG omen_scroll
+MODE CHANT.
+PROFILE "CIVIL"
+
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+    SAY: "Entering OMEN demo.".
+
+    RAISE OMEN "network_failure".
+
+    IF OMEN "network_failure" IS PRESENT THEN:
+        SAY: "We foresaw the network failure.".
+        FALLS_TO_RUIN: "Recovered from network failure.".
+    END.
+
+    THUS WE ANSWER WITH "OMEN demo complete.".
+ENDWORK
