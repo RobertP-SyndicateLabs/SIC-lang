@@ -1,0 +1,94 @@
+LANGUAGE "SIC 1.0".
+SCROLL STRONG SIC_Common_Canticle
+MODE CHANT.
+PROFILE "CIVIL / IMPERIAL SPEC".
+
+WORK PREFACE WITH SIGIL UNUSED AS TEXT:
+    SAY: "This scroll is the living canticle of SIC.".
+    SAY: "It records every rite currently enacted in the Empire.".
+ENDWORK
+
+WORK SIGIL_RITES WITH SIGIL UNUSED AS TEXT:
+    SAY: "SIGILS".
+    SAY: "  LET SIGIL name BE <expr>.".
+    SAY: "  EPHEMERAL SIGIL name BE <expr>.".
+    SAY: "  SIGILs hold string values; ARCWORK can treat them as numbers.".
+ENDWORK
+
+WORK CONTROL_RITES WITH SIGIL UNUSED AS TEXT:
+    SAY: "CONTROL".
+    SAY: "  IF SIGIL name EQUALS <expr> THEN: ... ELSE: ... END.".
+    SAY: "  IF OMEN \"name\" IS PRESENT THEN: ... END.".
+    SAY: "  WHILE SIGIL name EQUALS <expr>: ... ENDWHILE.".
+ENDWORK
+
+WORK ARC_RITES WITH SIGIL UNUSED AS TEXT:
+    SAY: "ARCWORK".
+    SAY: "  ARCWORK: ... ENDARCWORK.".
+    SAY: "    RAISE SIGIL name BY <num or SIGIL>.".
+    SAY: "    LOWER SIGIL name BY <num or SIGIL>.".
+ENDWORK
+
+WORK OMEN_RITES WITH SIGIL UNUSED AS TEXT:
+    SAY: "OMENS".
+    SAY: "  RAISE OMEN \"name\".".
+    SAY: "  OMEN \"name\": ... FALLS_TO_RUIN: ... ENDOMEN.".
+    SAY: "  Matching OMEN rolls back SIGILs to the pre-OMEN state.".
+ENDWORK
+
+WORK ALTAR_RITES WITH SIGIL UNUSED AS TEXT:
+    SAY: "ALTAR".
+    SAY: "  ALTAR name AT PORT N: ROUTE ... ENDALTAR.".
+    SAY: "  In mobile / stub mode, routes are logged but no HTTP is raised.".
+ENDWORK
+
+WORK SUMMON_RITES WITH SIGIL UNUSED AS TEXT:
+    SAY: "SUMMON / ANSWER".
+    SAY: "  SUMMON WORK Name WITH SIGIL arg.".
+    SAY: "  THUS WE ANSWER WITH <expr>.".
+    SAY: "  SEND BACK <expr>.".
+ENDWORK
+
+WORK WEAVE_RITES WITH SIGIL UNUSED AS TEXT:
+    SAY: "WEAVE".
+    SAY: "  WEAVE: ... SUMMON ... ENDWEAVE.".
+ENDWORK
+
+WORK FULL_DUMP WITH SIGIL UNUSED AS TEXT:
+    SAY: "=== SIC COMMON CANTICLE ===".
+    SUMMON WORK PREFACE WITH SIGIL UNUSED.
+    SUMMON WORK SIGIL_RITES WITH SIGIL UNUSED.
+    SUMMON WORK CONTROL_RITES WITH SIGIL UNUSED.
+    SUMMON WORK ARC_RITES WITH SIGIL UNUSED.
+    SUMMON WORK OMEN_RITES WITH SIGIL UNUSED.
+    SUMMON WORK ALTAR_RITES WITH SIGIL UNUSED.
+    SUMMON WORK SUMMON_RITES WITH SIGIL UNUSED.
+    SUMMON WORK WEAVE_RITES WITH SIGIL UNUSED.
+    SAY: "=== END CANTICLE ===".
+ENDWORK
+
+High-level language vision (Empire of Languages, CHANT, etc.)
+
+The pieces we’ve actually implemented:
+
+SCROLL / MODE / PROFILE headers
+
+WORK & SIGIL params
+
+SAY / LET / THUS / SEND BACK
+
+IF / ELSE / END
+
+SUMMON
+
+ARCWORK
+
+WEAVE
+
+OMEN / FALLS_TO_RUIN
+
+WHILE
+
+EPHEMERAL
+
+ALTAR (stub) + ROUTE
