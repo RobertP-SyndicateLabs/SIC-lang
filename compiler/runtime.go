@@ -7,6 +7,12 @@ import (
 	"strings"
 )
 
+// Global entanglement state for the *current* CHAMBER.
+//
+// For v0 we model this as a single map that CHAMBER saves/restores,
+// so nested CHAMBER blocks each see their own entanglement frame.
+var entangledCores = map[string]bool{}
+
 // ---- SIGIL ENVIRONMENT ----
 
 type sigilTable map[string]string
@@ -344,6 +350,31 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 			i = next
 			continue
 
+		case TOK_CHAMBER:
+			// CHAMBER ... ENDCHAMBER.
+			next, err := execChamberBlock(prog, tokens, i, sigils)
+			if err != nil {
+				return "", err
+			}
+			i = next
+			continue
+
+		case TOK_ENTANGLE:
+			next, err := execEntangle(tokens, i)
+			if err != nil {
+				return "", err
+			}
+			i = next
+			continue
+
+		case TOK_RELEASE:
+			next, err := execRelease(tokens, i)
+			if err != nil {
+				return "", err
+			}
+			i = next
+			continue
+
 		case TOK_ARCWORK:
 			// ARCWORK: ... ENDARCWORK.
 			next, err := execArcworkBlock(prog, tokens, i, sigils)
@@ -567,6 +598,73 @@ func execEphemeralSigil(prog *Program, tokens []Token, i int, sigils sigilTable)
 	}
 
 	return i, name, nil
+}
+
+// ENTANGLE CORE calc_space WITH "STACK".
+// ENTANGLE calc_space.
+// For now, ENTANGLE is bookkeeping only: we track which core names
+// are "entangled" inside the current CHAMBER.
+func execEntangle(tokens []Token, i int) (int, error) {
+	startTok := tokens[i] // TOK_ENTANGLE
+	i++
+
+	// Optional CORE keyword.
+	if i < len(tokens) && tokens[i].Type == TOK_CORE {
+		i++
+	}
+
+	if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
+		return i, fmt.Errorf("ENTANGLE: expected core name at %s:%d:%d",
+			startTok.File, startTok.Line, startTok.Column)
+	}
+	name := tokens[i].Lexeme
+	i++
+
+	// Optional: WITH <mode> (ignored for now).
+	if i < len(tokens) && tokens[i].Type == TOK_WITH {
+		i++
+		if i < len(tokens) && (tokens[i].Type == TOK_STRING || tokens[i].Type == TOK_IDENT) {
+			i++ // storage mode, ignored for now
+		}
+	}
+
+	// Optional trailing DOT.
+	if i < len(tokens) && tokens[i].Type == TOK_DOT {
+		i++
+	}
+
+	// Bookkeeping.
+	if entangledCores[name] {
+		return i, fmt.Errorf("ENTANGLE: core %s entangled twice in same CHAMBER at %s:%d:%d",
+			name, startTok.File, startTok.Line, startTok.Column)
+	}
+	entangledCores[name] = true
+	return i, nil
+}
+
+// RELEASE calc_space.
+func execRelease(tokens []Token, i int) (int, error) {
+	startTok := tokens[i] // TOK_RELEASE
+	i++
+
+	if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
+		return i, fmt.Errorf("RELEASE: expected core name at %s:%d:%d",
+			startTok.File, startTok.Line, startTok.Column)
+	}
+	name := tokens[i].Lexeme
+	i++
+
+	// Optional trailing DOT.
+	if i < len(tokens) && tokens[i].Type == TOK_DOT {
+		i++
+	}
+
+	if !entangledCores[name] {
+		return i, fmt.Errorf("RELEASE: core %s not entangled in this CHAMBER at %s:%d:%d",
+			name, startTok.File, startTok.Line, startTok.Column)
+	}
+	delete(entangledCores, name)
+	return i, nil
 }
 
 // ---------------- THUS WE ANSWER ----------------
@@ -1123,6 +1221,106 @@ func execWhile(prog *Program, tokens []Token, i int, sigils sigilTable) (int, er
 		k++
 	}
 	return k, nil
+}
+
+// ---------------- CHAMBER v0.1 ----------------
+//
+// CHAMBER my_scope:
+//     LET SIGIL gold BE "999".
+//     SAY: "Inside: " + gold + ".".
+// ENDCHAMBER.
+//
+// Semantics v0.1:
+// - CHAMBER creates a *scoped* execution environment.
+// - We clone the parent's sigils into a child table.
+// - We execute the body using execWork on a synthetic WorkDecl.
+// - Any changes made inside the CHAMBER (even non-EPHEMERAL) are discarded
+//   when we return; the parent sigils are untouched.
+
+// CHAMBER name:
+//
+//	...
+//
+// ENDCHAMBER.
+//
+// For now, CHAMBER:
+//   - clones the current sigils into a child scope
+//   - executes its body
+//   - discards any sigil changes on exit
+//   - enforces ENTANGLE/RELEASE correctness within its body
+func execChamberBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (int, error) {
+	startTok := tokens[i] // TOK_CHAMBER
+	i++
+
+	// Optional CHAMBER name.
+	if i < len(tokens) && tokens[i].Type == TOK_IDENT {
+		// chamberName := tokens[i].Lexeme // currently unused
+		i++
+	}
+
+	// Expect COLON.
+	if i >= len(tokens) || tokens[i].Type != TOK_COLON {
+		return i, fmt.Errorf("CHAMBER: expected COLON after header at %s:%d:%d",
+			startTok.File, startTok.Line, startTok.Column)
+	}
+	i++ // move past COLON
+
+	bodyStart := i
+
+	// Find matching ENDCHAMBER, respecting nesting.
+	depth := 1
+	endPos := -1
+	for j := i; j < len(tokens); j++ {
+		t := tokens[j]
+		switch t.Type {
+		case TOK_CHAMBER:
+			depth++
+		case TOK_ENDCHAMBER:
+			depth--
+			if depth == 0 {
+				endPos = j
+				goto foundEnd
+			}
+		}
+	}
+foundEnd:
+
+	if endPos == -1 {
+		return i, fmt.Errorf("CHAMBER: unmatched ENDCHAMBER for CHAMBER at %s:%d:%d",
+			startTok.File, startTok.Line, startTok.Column)
+	}
+
+	// New sigil scope (does not leak back out of the chamber).
+	childSigils := cloneSigils(sigils)
+
+	// Save/restore entanglement frame for this CHAMBER.
+	oldEntangled := entangledCores
+	entangledCores = map[string]bool{}
+
+	// Execute the chamber body.
+	if err := execBlock(prog, tokens[bodyStart:endPos], childSigils); err != nil {
+		entangledCores = oldEntangled
+		return endPos + 1, err
+	}
+
+	// Check for entangle leaks.
+	if len(entangledCores) != 0 {
+		entangledCores = oldEntangled
+		return endPos + 1, fmt.Errorf(
+			"EPHEMERAL: entangle leak in CHAMBER at %s:%d:%d",
+			startTok.File, startTok.Line, startTok.Column,
+		)
+	}
+
+	// Restore outer entanglement frame.
+	entangledCores = oldEntangled
+
+	// Move index to just after ENDCHAMBER (and optional trailing DOT).
+	i = endPos + 1
+	if i < len(tokens) && tokens[i].Type == TOK_DOT {
+		i++
+	}
+	return i, nil
 }
 
 // execBlock executes a slice of tokens as if it were a mini-Work.

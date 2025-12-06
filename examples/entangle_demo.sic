@@ -1,0 +1,27 @@
+LANGUAGE "SIC 1.0".
+SCROLL STRONG entangle_scroll
+MODE CHANT.
+PROFILE "CIVIL"
+
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+    SAY: "Entering ENTANGLE demo.".
+
+    CHAMBER SAFE_CORE:
+        ENTANGLE CORE calc_space WITH "STACK".
+        SAY: "Inside SAFE_CORE CHAMBER with calc_space entangled.".
+        RELEASE calc_space.
+    ENDCHAMBER.
+
+    SAY: "SAFE_CORE CHAMBER completed without leaks.".
+
+    CHAMBER LEAKED_CORE:
+        ENTANGLE CORE cursed WITH "STACK".
+        SAY: "Inside LEAKED_CORE CHAMBER; forgetting to RELEASE cursed.".
+        // Intentionally no RELEASE cursed here.
+    ENDCHAMBER.
+
+    // We will never reach this line because the leaked entanglement
+    // raises a runtime error at ENDCHAMBER.
+    THUS WE ANSWER WITH "ENTANGLE demo complete.".
+ENDWORK

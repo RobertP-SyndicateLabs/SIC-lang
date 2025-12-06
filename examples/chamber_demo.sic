@@ -1,0 +1,20 @@
+LANGUAGE "SIC 1.0".
+SCROLL STRONG chamber_scroll
+MODE CHANT.
+PROFILE "CIVIL"
+
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+    LET SIGIL gold BE "10".
+
+    SAY: "Outside before CHAMBER, gold is " + gold + ".".
+
+    CHAMBER INNER_SCOPE:
+        LET SIGIL gold BE "999".
+        SAY: "Inside CHAMBER, gold is " + gold + ".".
+    ENDCHAMBER.
+
+    SAY: "Outside after CHAMBER, gold is still " + gold + ".".
+
+    THUS WE ANSWER WITH "CHAMBER demo complete.".
+ENDWORK

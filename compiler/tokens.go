@@ -63,11 +63,15 @@ const (
 	TOK_CHAMBER    TokenType = "CHAMBER"
 	TOK_ENDCHAMBER TokenType = "ENDCHAMBER"
 
+	TOK_ENTANGLE TokenType = "ENTANGLE"
+	TOK_RELEASE  TokenType = "RELEASE"
+	TOK_CORE     TokenType = "CORE"
+
 	TOK_IF   TokenType = "IF"
 	TOK_ELSE TokenType = "ELSE"
 	TOK_END  TokenType = "END"
 
-        TOK_WHILE    TokenType = "WHILE"
+	TOK_WHILE    TokenType = "WHILE"
 	TOK_ENDWHILE TokenType = "ENDWHILE"
 
 	// Ephemeral / omens / summons
