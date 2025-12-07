@@ -67,6 +67,9 @@ const (
 	TOK_RELEASE  TokenType = "RELEASE"
 	TOK_CORE     TokenType = "CORE"
 
+        TOK_CHOIR     TokenType = "CHOIR"
+        TOK_ENDCHOIR  TokenType = "ENDCHOIR"
+
 	TOK_IF   TokenType = "IF"
 	TOK_ELSE TokenType = "ELSE"
 	TOK_END  TokenType = "END"

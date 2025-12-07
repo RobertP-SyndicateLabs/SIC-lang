@@ -310,6 +310,9 @@ var keywords = map[string]TokenType{
 	"ENDWEAVE.": TOK_ENDWEAVE, // defensive if someone writes ENDWEAVE. as one token
 	"ENDWEAVE:": TOK_ENDWEAVE, // likewise
 	"ENDWEAVE;": TOK_ENDWEAVE,
+        "CHOIR":     TOK_CHOIR,
+        "ENDCHOIR":  TOK_ENDCHOIR,
+
 	"AT":        TOK_AT,
 	"LEVEL":     TOK_LEVEL,
 
