@@ -5,6 +5,21 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+        "net/http"
+)
+
+// ---- ALTAR runtime ----
+
+type altarServer struct {
+    addr    string
+    mux     *http.ServeMux
+    started bool
+}
+
+var (
+    altarMu     sync.Mutex
+    globalAltar *altarServer
 )
 
 // Global entanglement state for the *current* CHAMBER.
@@ -279,6 +294,14 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 			i = next
 			continue
 
+		case TOK_CHOIR:
+			next, err := execChoirBlock(prog, tokens, i, sigils)
+			if err != nil {
+				return "", err
+			}
+			i = next
+			continue
+
 		case TOK_WHILE:
 			// WHILE condition ... ENDWHILE.
 			next, err := execWhile(prog, tokens, i, sigils)
@@ -288,14 +311,13 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 			i = next
 			continue
 
-		case TOK_ALTAR:
-			// ALTAR ... ENDALTAR.
-			next, err := execAltarBlock(prog, tokens, i, sigils)
-			if err != nil {
-				return "", err
-			}
-			i = next
-			continue
+                case TOK_ALTAR:
+                    next, err := execAltarBlock(prog, tokens, i, sigils)
+                    if err != nil {
+                        return "", err
+                    }
+                    i = next
+                    continue
 
 		case TOK_SUMMON:
 			// Standalone SUMMON as a statement.
@@ -1877,154 +1899,345 @@ func execWeaveBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 		startTok.File, startTok.Line, startTok.Column)
 }
 
+// ---------------- CHOIR (structured parallel SUMMONs) ----------------
+//
+// CHOIR:
+//   SUMMON WORK A WITH SIGIL "one".
+//   SUMMON WORK B WITH SIGIL "two".
+// ENDCHOIR.
+//
+// Semantics v0.1:
+// - Each SUMMON runs in its own goroutine.
+// - Parent waits for all to complete before continuing.
+// - Child sigils are isolated via SUMMON semantics.
+// - Output ordering *between* tasks is not guaranteed.
+
+func execChoirBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (int, error) {
+	startTok := tokens[i] // TOK_CHOIR
+	i++                   // after CHOIR
+
+	// Optional colon: "CHOIR:" vs "CHOIR"
+	if i < len(tokens) && tokens[i].Type == TOK_COLON {
+		i++
+	}
+
+	// Skip leading newlines
+	for i < len(tokens) && tokens[i].Type == TOK_NEWLINE {
+		i++
+	}
+
+	// Find ENDCHOIR
+	endPos := -1
+	for j := i; j < len(tokens); j++ {
+		t := tokens[j]
+		if t.Type == TOK_ENDCHOIR || (t.Type == TOK_IDENT && t.Lexeme == "ENDCHOIR") {
+			endPos = j
+			break
+		}
+	}
+	if endPos == -1 {
+		return i, fmt.Errorf("CHOIR: missing ENDCHOIR for block starting at %s:%d:%d",
+			startTok.File, startTok.Line, startTok.Column)
+	}
+
+	// Collect starting indices of SUMMON statements inside the CHOIR body.
+	var starts []int
+	j := i
+	for j < endPos {
+		tok := tokens[j]
+		if tok.Type == TOK_NEWLINE {
+			j++
+			continue
+		}
+
+		if tok.Type != TOK_SUMMON {
+			return j, fmt.Errorf(
+				"CHOIR: only SUMMON statements are allowed inside CHOIR (found %s at %s:%d:%d)",
+				tok.Type, tok.File, tok.Line, tok.Column,
+			)
+		}
+
+		stmtStart := j
+		starts = append(starts, stmtStart)
+
+		// Walk to end of this statement: DOT / NEWLINE / ENDCHOIR / ENDWORK
+		for j < endPos &&
+			tokens[j].Type != TOK_DOT &&
+			tokens[j].Type != TOK_NEWLINE &&
+			tokens[j].Type != TOK_ENDWORK &&
+			tokens[j].Type != TOK_ENDCHOIR {
+			j++
+		}
+		if j < endPos && tokens[j].Type == TOK_DOT {
+			j++
+		}
+
+		// Skip blank lines before next statement
+		for j < endPos && tokens[j].Type == TOK_NEWLINE {
+			j++
+		}
+	}
+
+	// No SUMMONs? Just skip CHOIR and move on.
+	if len(starts) == 0 {
+		k := endPos + 1
+		if k < len(tokens) && tokens[k].Type == TOK_DOT {
+			k++
+		}
+		return k, nil
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(starts))
+
+	for _, start := range starts {
+		wg.Add(1)
+
+		go func(startIdx int) {
+			defer wg.Done()
+			// Use regular SUMMON semantics; ignore returned index since
+			// CHOIR controls its own scanning.
+			_, err := execSummonStmt(prog, tokens, startIdx, sigils)
+			if err != nil {
+				errs <- err
+			}
+		}(start)
+	}
+
+	wg.Wait()
+	close(errs)
+
+	// If any SUMMON failed, bubble the first error.
+	for err := range errs {
+		if err != nil {
+			return endPos + 1, err
+		}
+	}
+
+	// Resume after ENDCHOIR (and optional DOT)
+	k := endPos + 1
+	if k < len(tokens) && tokens[k].Type == TOK_DOT {
+		k++
+	}
+	return k, nil
+}
+
 // ---------------- ALTAR / ROUTE Canticle ----------------
 //
 // ALTAR my_server AT PORT 15080:
 //     ROUTE GET "/hello" WITH HANDLER HELLO.
 // ENDALTAR.
 //
-// For now, ALTAR is a semantic stub: we parse and log the altar + routes,
-// but we don't actually spin up an HTTP server (keeps Termux / mobile happy).
-
+// ALTAR AT :15080:
+//   ROUTE GET "/hello" TO WORK HELLO.
+// ENDALTAR.
+//
+// v1 semantics:
+// - Start (or reuse) an HTTP server at given addr.
+// - Register each ROUTE inside this ALTAR block.
+// - Then block the main goroutine so the server stays alive.
 func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (int, error) {
-	startTok := tokens[i] // TOK_ALTAR
-	i++
+    startTok := tokens[i] // TOK_ALTAR
+    i++
 
-	// Optional altar name (IDENT)
-	altarName := "ALTAR"
-	if i < len(tokens) && tokens[i].Type == TOK_IDENT {
-		altarName = tokens[i].Lexeme
-		i++
-	}
+    // Expect: AT
+    if i >= len(tokens) || tokens[i].Type != TOK_AT {
+        return i, fmt.Errorf("ALTAR: expected AT after ALTAR at %s:%d:%d",
+            startTok.File, startTok.Line, startTok.Column)
+    }
+    i++
 
-	// Expect AT PORT <num>
-	if i >= len(tokens) || tokens[i].Type != TOK_AT {
-		return i, fmt.Errorf("ALTAR: expected AT after ALTAR at %s:%d:%d",
-			startTok.File, startTok.Line, startTok.Column)
-	}
-	i++
+    // ---------- parse address after AT ----------
+    if i >= len(tokens) {
+        return i, fmt.Errorf("ALTAR: expected port or address after AT")
+    }
 
-	if i >= len(tokens) || tokens[i].Type != TOK_PORT {
-		return i, fmt.Errorf("ALTAR: expected PORT after AT at %s:%d:%d",
-			tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
-	}
-	i++
+    var addr string
+    tok := tokens[i]
 
-	if i >= len(tokens) || tokens[i].Type != TOK_NUM {
-		return i, fmt.Errorf("ALTAR: expected port number after PORT at %s:%d:%d",
-			tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
-	}
-	port := tokens[i].Lexeme
-	i++
+    switch tok.Type {
+    case TOK_STRING:
+        // e.g. ":15080" or "localhost:15080"
+        addr = tok.Lexeme
+        i++
 
-	// Expect COLON
-	if i >= len(tokens) || tokens[i].Type != TOK_COLON {
-		return i, fmt.Errorf("ALTAR: expected COLON after PORT %s at %s:%d:%d",
-			port, tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
-	}
-	i++ // after COLON
+    case TOK_COLON:
+        // :15080
+        if i+1 >= len(tokens) || tokens[i+1].Type != TOK_NUM {
+            return i, fmt.Errorf("ALTAR: expected numeric port after ':' at %s:%d:%d",
+                tok.File, tok.Line, tok.Column)
+        }
+        addr = ":" + tokens[i+1].Lexeme
+        i += 2
 
-	// Collect ROUTE lines until ENDALTAR. For now we just log them.
-	type routeSpec struct {
-		method  string
-		path    string
-		handler string
-	}
+    case TOK_NUM:
+        // bare 15080 → ":15080"
+        addr = ":" + tok.Lexeme
+        i++
 
-	var routes []routeSpec
+    default:
+        return i, fmt.Errorf("ALTAR: invalid address token %s at %s:%d:%d",
+            tok.Type, tok.File, tok.Line, tok.Column)
+    }
 
-	for i < len(tokens) {
-		tok := tokens[i]
+    // Optional colon after address: ALTAR AT :15080:
+    if i < len(tokens) && tokens[i].Type == TOK_COLON {
+        i++
+    }
 
-		if tok.Type == TOK_NEWLINE {
-			i++
-			continue
-		}
+    fmt.Printf("[SIC ALTAR] ALTAR awakening at %s.\n", addr)
 
-		if tok.Type == TOK_ENDALTAR {
-			i++
-			// Optional trailing DOT
-			if i < len(tokens) && tokens[i].Type == TOK_DOT {
-				i++
-			}
-			break
-		}
+    // ---------- init / start server (singleton) ----------
+    altarMu.Lock()
+    if globalAltar == nil {
+        globalAltar = &altarServer{
+            addr: addr,
+            mux:  http.NewServeMux(),
+        }
+    } else if globalAltar.addr != addr {
+        prev := globalAltar.addr
+        altarMu.Unlock()
+        return i, fmt.Errorf("ALTAR: server already bound to %s, cannot rebind to %s",
+            prev, addr)
+    }
 
-		if tok.Type == TOK_ROUTE {
-			// ROUTE GET "/path" WITH HANDLER NAME.
-			j := i + 1
+    srv := globalAltar
+    if !srv.started {
+        srv.started = true
+        go func(s *altarServer) {
+            fmt.Fprintf(os.Stderr, "[SIC ALTAR] HTTP server listening on %s.\n", s.addr)
+            if err := http.ListenAndServe(s.addr, s.mux); err != nil {
+                fmt.Fprintf(os.Stderr, "[SIC ALTAR] server error: %v\n", err)
+            }
+        }(srv)
+    }
+    altarMu.Unlock()
 
-			if j >= len(tokens) {
-				return j, fmt.Errorf("ROUTE: unexpected EOF after ROUTE at %s:%d:%d",
-					tok.File, tok.Line, tok.Column)
-			}
+    // ---------- parse ROUTE statements ----------
+    for i < len(tokens) {
+        tok := tokens[i]
 
-			methodTok := tokens[j]
-			if methodTok.Type != TOK_GET &&
-				methodTok.Type != TOK_POST &&
-				methodTok.Type != TOK_PUT &&
-				methodTok.Type != TOK_DELETE {
-				return j, fmt.Errorf("ROUTE: expected HTTP method after ROUTE at %s:%d:%d",
-					methodTok.File, methodTok.Line, methodTok.Column)
-			}
-			method := methodTok.Lexeme
-			j++
+        // Skip blank lines
+        if tok.Type == TOK_NEWLINE {
+            i++
+            continue
+        }
 
-			if j >= len(tokens) || tokens[j].Type != TOK_STRING {
-				return j, fmt.Errorf("ROUTE: expected path string after method at %s:%d:%d",
-					tokens[j-1].File, tokens[j-1].Line, tokens[j-1].Column)
-			}
-			path := tokens[j].Lexeme
-			j++
+        // ENDALTAR.
+        if tok.Type == TOK_ENDALTAR {
+            i++
+            if i < len(tokens) && tokens[i].Type == TOK_DOT {
+                i++
+            }
+            break
+        }
 
-			if j >= len(tokens) || tokens[j].Type != TOK_WITH {
-				return j, fmt.Errorf("ROUTE: expected WITH after path at %s:%d:%d",
-					tokens[j-1].File, tokens[j-1].Line, tokens[j-1].Column)
-			}
-			j++
+        if tok.Type != TOK_ROUTE {
+            return i, fmt.Errorf("ALTAR: expected ROUTE or ENDALTAR, found %s at %s:%d:%d",
+                tok.Type, tok.File, tok.Line, tok.Column)
+        }
+        i++ // after ROUTE
 
-			if j >= len(tokens) || tokens[j].Type != TOK_HANDLER {
-				return j, fmt.Errorf("ROUTE: expected HANDLER after WITH at %s:%d:%d",
-					tokens[j-1].File, tokens[j-1].Line, tokens[j-1].Column)
-			}
-			j++
+        // HTTP method
+        if i >= len(tokens) ||
+            !((tokens[i].Type == TOK_GET) ||
+                (tokens[i].Type == TOK_POST) ||
+                (tokens[i].Type == TOK_PUT) ||
+                (tokens[i].Type == TOK_DELETE)) {
+            return i, fmt.Errorf("ALTAR: expected HTTP method after ROUTE")
+        }
+        method := tokens[i].Lexeme
+        i++
 
-			if j >= len(tokens) || tokens[j].Type != TOK_IDENT {
-				return j, fmt.Errorf("ROUTE: expected handler name after HANDLER at %s:%d:%d",
-					tokens[j-1].File, tokens[j-1].Line, tokens[j-1].Column)
-			}
-			handler := tokens[j].Lexeme
-			j++
+        // Path
+        if i >= len(tokens) {
+            return i, fmt.Errorf("ALTAR: missing path after method %s", method)
+        }
 
-			// Skip to end of line / DOT
-			for j < len(tokens) && tokens[j].Type != TOK_DOT && tokens[j].Type != TOK_NEWLINE {
-				j++
-			}
-			if j < len(tokens) && tokens[j].Type == TOK_DOT {
-				j++
-			}
+        var path string
+        if tokens[i].Type == TOK_STRING {
+            path = tokens[i].Lexeme
+            i++
+        } else {
+            path = tokens[i].Lexeme
+            i++
+        }
 
-			routes = append(routes, routeSpec{
-				method:  method,
-				path:    path,
-				handler: handler,
-			})
+        // Expect IDENT "TO"
+        if i >= len(tokens) || !(tokens[i].Type == TOK_IDENT && tokens[i].Lexeme == "TO") {
+            return i, fmt.Errorf("ALTAR: expected TO after ROUTE %s %s", method, path)
+        }
+        i++
 
-			i = j
-			continue
-		}
+        // WORK
+        if i >= len(tokens) || tokens[i].Type != TOK_WORK {
+            return i, fmt.Errorf("ALTAR: expected WORK after TO at %s:%d:%d",
+                tokens[i].File, tokens[i].Line, tokens[i].Column)
+        }
+        i++
 
-		return i, fmt.Errorf("ALTAR: unexpected token %s at %s:%d:%d",
-			tok.Type, tok.File, tok.Line, tok.Column)
-	}
+        // WORK name
+        if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
+            return i, fmt.Errorf("ALTAR: expected WORK name after TO WORK")
+        }
+        handlerName := tokens[i].Lexeme
+        i++
 
-	// For now, just log what we *would* raise.
-	fmt.Printf("[SIC ALTAR] ALTAR %s at :%s (stubbed; no HTTP server started).\n", altarName, port)
-	for _, r := range routes {
-		fmt.Printf("[SIC ALTAR] ROUTE %s %s -> handler %s\n", r.method, r.path, r.handler)
-	}
+        // Optional DOT
+        if i < len(tokens) && tokens[i].Type == TOK_DOT {
+            i++
+        }
 
-	return i, nil
+        fmt.Printf("[SIC ALTAR ROUTE] Route %s %s -> handler %s\n",
+            method, path, handlerName)
+
+        // ---------- register HTTP handler ----------
+        altarMu.Lock()
+
+        // Copy locals to avoid closure capture weirdness
+        m := method
+        p := path
+        h := handlerName
+        parentSigils := sigils
+
+        srv.mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
+            if r.Method != m {
+                http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+                return
+            }
+
+            work := findWork(prog, h)
+            if work == nil {
+                fmt.Fprintf(os.Stderr, "[SIC ALTAR] handler WORK %s not found\n", h)
+                http.Error(w, "handler not found", http.StatusInternalServerError)
+                return
+            }
+
+            // Clone sigils like SUMMON does
+            child := make(sigilTable)
+            for k, v := range parentSigils {
+                child[k] = v
+            }
+
+            _, err := execWork(prog, work, child, false)
+            if err != nil {
+                fmt.Fprintf(os.Stderr, "[SIC ALTAR] handler %s error: %v\n", h, err)
+                http.Error(w, "internal error", http.StatusInternalServerError)
+                return
+            }
+
+            w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+            _, _ = w.Write([]byte("OK\n"))
+        })
+
+        altarMu.Unlock()
+    }
+
+    // ---------- BLOCK HERE: keep process alive ----------
+    fmt.Fprintf(os.Stderr, "[SIC ALTAR] ALTAR is now holding the process open on %s.\n", addr)
+    select {} // block forever; never return to MAIN
+    // unreachable, but keeps compiler happy:
+    // return i, nil
 }
 
 // SUMMON as a statement: ignore the returned value, keep side-effects.
