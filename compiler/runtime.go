@@ -1243,36 +1243,58 @@ func execThus(prog *Program, tokens []Token, i int, sigils sigilTable) (string, 
 	return val, i, nil
 }
 
-// ---------------- SEND BACK ----------------
-
-// SEND BACK SIGIL name.
-// SEND BACK <expr>.
+// SEND BACK canticle
 //
-// Returns the string value to the caller (WORK ANSWER, ALTAR handler, etc.)
-// and the new token index.
+// Forms:
+//
+//	SEND BACK "literal".
+//	SEND BACK left + right.
+//	SEND BACK SIGIL answer.
+//
+// BACK is required in CHANT scrolls, but we match by lexeme so the
+// token type (IDENT vs keyword) can't break us. We also tolerate an
+// optional colon:  SEND BACK: "OK".
 func execSendBack(prog *Program, tokens []Token, i int, sigils sigilTable) (string, int, error) {
 	startTok := tokens[i] // "SEND"
 	i++
 
-	// Expect IDENT "BACK"
-	if i >= len(tokens) || tokens[i].Type != TOK_IDENT || tokens[i].Lexeme != "BACK" {
-		return "", i, fmt.Errorf("SEND BACK: expected BACK after SEND at %s:%d:%d",
-			startTok.File, startTok.Line, startTok.Column)
+	// Skip any NEWLINEs immediately after SEND
+	for i < len(tokens) && tokens[i].Type == TOK_NEWLINE {
+		i++
+	}
+
+	// Require the word BACK by lexeme (case-insensitive),
+	// but don't care about token type.
+	if i >= len(tokens) || !strings.EqualFold(tokens[i].Lexeme, "BACK") {
+		return "", i, fmt.Errorf(
+			"SEND BACK: expected BACK after SEND at %s:%d:%d",
+			startTok.File, startTok.Line, startTok.Column,
+		)
 	}
 	i++ // consume BACK
 
-	// Special-case: SEND BACK SIGIL name.
-	if i < len(tokens) && tokens[i].Type == TOK_SIGIL {
+	// Optional colon, e.g. SEND BACK: "OK".
+	if i < len(tokens) && tokens[i].Type == TOK_COLON {
 		i++
+	}
+
+	// ----------------------------------------------------
+	// Special-case: SEND BACK SIGIL name.
+	// ----------------------------------------------------
+	if i < len(tokens) && tokens[i].Type == TOK_SIGIL {
+		i++ // SIGIL
+
 		if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
-			return "", i, fmt.Errorf("SEND BACK: expected SIGIL name after SIGIL at %s:%d:%d",
-				tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
+			return "", i, fmt.Errorf(
+				"SEND BACK: expected SIGIL name after SIGIL at %s:%d:%d",
+				tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column,
+			)
 		}
 		name := tokens[i].Lexeme
 		val, _ := getSigil(sigils, name)
 		i++
 
-		// Skip until DOT / NEWLINE / ENDWORK
+		// Skip to end of statement (DOT / NEWLINE / ENDWORK)
 		for i < len(tokens) &&
 			tokens[i].Type != TOK_DOT &&
 			tokens[i].Type != TOK_NEWLINE &&
@@ -1285,8 +1307,10 @@ func execSendBack(prog *Program, tokens []Token, i int, sigils sigilTable) (stri
 		return val, i, nil
 	}
 
+	// ----------------------------------------------------
 	// General case: SEND BACK <expr>.
-	// First, find the end of the expression (DOT / NEWLINE / ENDWORK).
+	// Expression runs until DOT / NEWLINE / ENDWORK.
+	// ----------------------------------------------------
 	exprStart := i
 	for i < len(tokens) &&
 		tokens[i].Type != TOK_DOT &&
@@ -1294,14 +1318,18 @@ func execSendBack(prog *Program, tokens []Token, i int, sigils sigilTable) (stri
 		tokens[i].Type != TOK_ENDWORK {
 		i++
 	}
+	exprEnd := i
 
-	// Now evaluate just that slice.
-	val, err := evalStringExpr(prog, tokens[exprStart:i], sigils)
+	// Slice out just the expression tokens for the engine
+	exprTokens := make([]Token, exprEnd-exprStart)
+	copy(exprTokens, tokens[exprStart:exprEnd])
+
+	val, err := evalStringExpr(prog, exprTokens, sigils)
 	if err != nil {
 		return "", i, err
 	}
 
-	// Optional trailing DOT.
+	// Optional trailing DOT
 	if i < len(tokens) && tokens[i].Type == TOK_DOT {
 		i++
 	}
@@ -2536,13 +2564,15 @@ func execChoirBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 //
 // ALTAR my_server AT PORT 15080:
 //
-//	ROUTE GET "/hello" WITH HANDLER HELLO.
+//	ROUTE GET "/hello" TO WORK HELLO.
 //
 // ENDALTAR.
 //
 // ALTAR AT :15080:
 //
 //	ROUTE GET "/hello" TO WORK HELLO.
+//	ROUTE GET "/ok"    TO SEND BACK "OK".
+//	ROUTE GET "/sum"   TO SEND BACK "1 + 2 * 3".
 //
 // ENDALTAR.
 //
@@ -2611,8 +2641,7 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 	} else if globalAltar.addr != addr {
 		prev := globalAltar.addr
 		altarMu.Unlock()
-		return i, fmt.Errorf("ALTAR: server already bound to %s, cannot rebind to %s",
-			prev, addr)
+		return i, fmt.Errorf("ALTAR: server already bound to %s, cannot also bind %s", prev, addr)
 	}
 
 	srv := globalAltar
@@ -2647,7 +2676,7 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 		}
 
 		if tok.Type != TOK_ROUTE {
-			return i, fmt.Errorf("ALTAR: expected ROUTE or ENDALTAR, found %s at %s:%d:%d",
+			return i, fmt.Errorf("ALTAR: expected ROUTE or ENDALTAR, got %s at %s:%d:%d",
 				tok.Type, tok.File, tok.Line, tok.Column)
 		}
 		i++ // after ROUTE
@@ -2658,14 +2687,16 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 				(tokens[i].Type == TOK_POST) ||
 				(tokens[i].Type == TOK_PUT) ||
 				(tokens[i].Type == TOK_DELETE)) {
-			return i, fmt.Errorf("ALTAR: expected HTTP method after ROUTE")
+			return i, fmt.Errorf("ALTAR: expected HTTP method after ROUTE at %s:%d:%d",
+				tokens[i].File, tokens[i].Line, tokens[i].Column)
 		}
 		method := tokens[i].Lexeme
 		i++
 
 		// Path
 		if i >= len(tokens) {
-			return i, fmt.Errorf("ALTAR: missing path after method %s", method)
+			return i, fmt.Errorf("ALTAR: missing path after method at %s:%d:%d",
+				tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
 		}
 
 		var path string
@@ -2678,80 +2709,167 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 		}
 
 		// Expect IDENT "TO"
-		if i >= len(tokens) || !(tokens[i].Type == TOK_IDENT && tokens[i].Lexeme == "TO") {
-			return i, fmt.Errorf("ALTAR: expected TO after ROUTE %s %s", method, path)
+		if i >= len(tokens) || !(tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "TO")) {
+			return i, fmt.Errorf("ALTAR: expected TO after ROUTE %s %s at %s:%d:%d",
+				method, path, tokens[i].File, tokens[i].Line, tokens[i].Column)
 		}
-		i++
+		i++ // after TO
 
-		// WORK
-		if i >= len(tokens) || tokens[i].Type != TOK_WORK {
-			return i, fmt.Errorf("ALTAR: expected WORK after TO at %s:%d:%d",
-				tokens[i].File, tokens[i].Line, tokens[i].Column)
+		if i >= len(tokens) {
+			return i, fmt.Errorf("ALTAR: expected WORK or SEND after TO at %s:%d:%d",
+				tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
 		}
-		i++
 
-		// WORK name
-		if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
-			return i, fmt.Errorf("ALTAR: expected WORK name after TO WORK")
-		}
-		handlerName := tokens[i].Lexeme
-		i++
+		// ----------------------------------------------------
+		// 1) ROUTE ... TO WORK <handler>.
+		// ----------------------------------------------------
+		if tokens[i].Type == TOK_WORK {
+			i++ // WORK
 
-		// Optional DOT
-		if i < len(tokens) && tokens[i].Type == TOK_DOT {
+			if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
+				return i, fmt.Errorf("ALTAR: expected WORK name after WORK at %s:%d:%d",
+					tokens[i].File, tokens[i].Line, tokens[i].Column)
+			}
+			handlerName := tokens[i].Lexeme
 			i++
+
+			// Optional DOT
+			if i < len(tokens) && tokens[i].Type == TOK_DOT {
+				i++
+			}
+
+			fmt.Printf("[SIC ALTAR ROUTE] Route %s %s -> WORK %s\n",
+				method, path, handlerName)
+
+			// Register handler using existing WORK semantics
+			altarMu.Lock()
+			m := method
+			p := path
+			h := handlerName
+			parentSigils := sigils
+			mux := srv.mux
+
+			mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != m {
+					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+					return
+				}
+
+				work := findWork(prog, h)
+				if work == nil {
+					fmt.Fprintf(os.Stderr, "[SIC ALTAR] handler WORK %s not found\n", h)
+					http.Error(w, "handler not found", http.StatusInternalServerError)
+					return
+				}
+
+				// Clone sigils like SUMMON does
+				child := make(sigilTable)
+				for k, v := range parentSigils {
+					child[k] = v
+				}
+
+				_, err := execWork(prog, work, child, false)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[SIC ALTAR] handler %s error: %v\n", h, err)
+					http.Error(w, "internal error", http.StatusInternalServerError)
+					return
+				}
+
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				_, _ = w.Write([]byte("OK\n"))
+			})
+
+			altarMu.Unlock()
+			continue
 		}
 
-		fmt.Printf("[SIC ALTAR ROUTE] Route %s %s -> handler %s\n",
-			method, path, handlerName)
+		// ----------------------------------------------------
+		// 2) ROUTE ... TO SEND BACK <expr>.
+		//    BACK is optional; SEND <expr> also works.
+		// ----------------------------------------------------
+		if tokens[i].Type == TOK_SEND {
+			i++ // consume SEND
 
-		// ---------- register HTTP handler ----------
-		altarMu.Lock()
-
-		// Copy locals to avoid closure capture weirdness
-		m := method
-		p := path
-		h := handlerName
-		parentSigils := sigils
-
-		srv.mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != m {
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
+			// Allow blank lines between SEND and BACK/expression
+			for i < len(tokens) && tokens[i].Type == TOK_NEWLINE {
+				i++
 			}
 
-			work := findWork(prog, h)
-			if work == nil {
-				fmt.Fprintf(os.Stderr, "[SIC ALTAR] handler WORK %s not found\n", h)
-				http.Error(w, "handler not found", http.StatusInternalServerError)
-				return
+			// Optional BACK keyword (by lexeme, any token type)
+			if i < len(tokens) && strings.EqualFold(tokens[i].Lexeme, "BACK") {
+				i++ // after BACK
+
+				// Optional colon, e.g. SEND BACK: "OK".
+				if i < len(tokens) && tokens[i].Type == TOK_COLON {
+					i++
+				}
 			}
 
-			// Clone sigils like SUMMON does
-			child := make(sigilTable)
-			for k, v := range parentSigils {
-				child[k] = v
+			// Expression starts here and runs up to DOT / NEWLINE / ENDALTAR
+			exprStart := i
+			for i < len(tokens) &&
+				tokens[i].Type != TOK_DOT &&
+				tokens[i].Type != TOK_NEWLINE &&
+				tokens[i].Type != TOK_ENDALTAR {
+				i++
+			}
+			exprEnd := i
+
+			// Copy expression tokens so the closure has a stable slice
+			exprTokens := make([]Token, exprEnd-exprStart)
+			copy(exprTokens, tokens[exprStart:exprEnd])
+
+			// Optional DOT at end of route line
+			if i < len(tokens) && tokens[i].Type == TOK_DOT {
+				i++
 			}
 
-			_, err := execWork(prog, work, child, false)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[SIC ALTAR] handler %s error: %v\n", h, err)
-				http.Error(w, "internal error", http.StatusInternalServerError)
-				return
-			}
+			fmt.Printf("[SIC ALTAR ROUTE] Route %s %s -> inline SEND BACK\n",
+				method, path)
 
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			_, _ = w.Write([]byte("OK\n"))
-		})
+			altarMu.Lock()
 
-		altarMu.Unlock()
+			m := method
+			p := path
+			exprCopy := exprTokens
+			parentSigils := sigils
+			mux := srv.mux
+
+			mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != m {
+					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+					return
+				}
+
+				// Clone sigils like SUMMON does
+				child := make(sigilTable)
+				for k, v := range parentSigils {
+					child[k] = v
+				}
+
+				val, err := evalStringExpr(prog, exprCopy, child)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[SIC ALTAR] inline SEND BACK error: %v\n", err)
+					http.Error(w, "internal error", http.StatusInternalServerError)
+					return
+				}
+
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				_, _ = w.Write([]byte(val + "\n"))
+			})
+
+			altarMu.Unlock()
+			continue
+		}
+
+		// If we reach here, token after TO was neither WORK nor SEND
+		return i, fmt.Errorf("ALTAR: expected WORK or SEND after TO at %s:%d:%d",
+			tokens[i].File, tokens[i].Line, tokens[i].Column)
 	}
 
 	// ---------- BLOCK HERE: keep process alive ----------
 	fmt.Fprintf(os.Stderr, "[SIC ALTAR] ALTAR is now holding the process open on %s.\n", addr)
 	select {} // block forever; never return to MAIN
-	// unreachable, but keeps compiler happy:
-	// return i, nil
 }
 
 // SUMMON as a statement: ignore the returned value, keep side-effects.
