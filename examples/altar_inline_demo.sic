@@ -6,7 +6,8 @@ WORK MAIN WITH SIGIL UNUSED AS TEXT:
   SAY: "Raising ALTAR inline demo.".
 
   ALTAR AT :15080:
-    ROUTE GET "/hello" TO SEND BACK "OK".
+    ROUTE GET "/hello" TO SEND BACK "Hello from " + REQUEST_METHOD + " " + REQUEST_PATH + ".".
+    ROUTE GET "/who"   TO SEND BACK "You are " + Q_NAME + ".".
   ENDALTAR.
 
 ENDWORK.

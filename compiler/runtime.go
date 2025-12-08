@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -2560,6 +2561,62 @@ func execChoirBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 	return k, nil
 }
 
+// injectRequestSigils populates SIGILs for the current HTTP request.
+// These are available inside any WORK run via ALTAR, or inline SEND BACK.
+//
+// Exposed SIGILs (all TEXT):
+//
+//	REQUEST_METHOD  -> "GET", "POST", etc.
+//	REQUEST_PATH    -> "/hello"
+//	REQUEST_QUERY   -> raw query string, e.g. "name=Ada&x=1"
+//	REQUEST_BODY    -> request body as text (best-effort)
+//
+// Additionally, each query parameter key is exposed as:
+//
+//	Q_<UPPERCASE_KEY>  -> first value
+//
+// e.g. ?name=Ada  => SIGIL Q_NAME BE "Ada"
+func injectRequestSigils(child sigilTable, r *http.Request) {
+	if r == nil {
+		return
+	}
+
+	// Basic fields
+	child["REQUEST_METHOD"] = r.Method
+	if r.URL != nil {
+		child["REQUEST_PATH"] = r.URL.Path
+		child["REQUEST_QUERY"] = r.URL.RawQuery
+	} else {
+		child["REQUEST_PATH"] = ""
+		child["REQUEST_QUERY"] = ""
+	}
+
+	// Query params: Q_<KEY>
+	if r.URL != nil {
+		q := r.URL.Query()
+		for key, vals := range q {
+			if len(vals) == 0 {
+				continue
+			}
+			sigilName := "Q_" + strings.ToUpper(key)
+			child[sigilName] = vals[0]
+		}
+	}
+
+	// Body (best-effort)
+	if r.Body != nil {
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err == nil {
+			child["REQUEST_BODY"] = string(bodyBytes)
+		} else {
+			child["REQUEST_BODY"] = ""
+		}
+		// We don't need the body again in this runtime, so we don't re-wrap it.
+	} else {
+		child["REQUEST_BODY"] = ""
+	}
+}
+
 // ---------------- ALTAR / ROUTE Canticle ----------------
 //
 // ALTAR my_server AT PORT 15080:
@@ -2641,7 +2698,8 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 	} else if globalAltar.addr != addr {
 		prev := globalAltar.addr
 		altarMu.Unlock()
-		return i, fmt.Errorf("ALTAR: server already bound to %s, cannot also bind %s", prev, addr)
+		return i, fmt.Errorf("ALTAR: server already bound to %s, cannot rebind to %s",
+			prev, addr)
 	}
 
 	srv := globalAltar
@@ -2676,7 +2734,7 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 		}
 
 		if tok.Type != TOK_ROUTE {
-			return i, fmt.Errorf("ALTAR: expected ROUTE or ENDALTAR, got %s at %s:%d:%d",
+			return i, fmt.Errorf("ALTAR: expected ROUTE or ENDALTAR, found %s at %s:%d:%d",
 				tok.Type, tok.File, tok.Line, tok.Column)
 		}
 		i++ // after ROUTE
@@ -2688,7 +2746,7 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 				(tokens[i].Type == TOK_PUT) ||
 				(tokens[i].Type == TOK_DELETE)) {
 			return i, fmt.Errorf("ALTAR: expected HTTP method after ROUTE at %s:%d:%d",
-				tokens[i].File, tokens[i].Line, tokens[i].Column)
+				tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
 		}
 		method := tokens[i].Lexeme
 		i++
@@ -2698,7 +2756,6 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 			return i, fmt.Errorf("ALTAR: missing path after method at %s:%d:%d",
 				tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
 		}
-
 		var path string
 		if tokens[i].Type == TOK_STRING {
 			path = tokens[i].Lexeme
@@ -2727,7 +2784,7 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 			i++ // WORK
 
 			if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
-				return i, fmt.Errorf("ALTAR: expected WORK name after WORK at %s:%d:%d",
+				return i, fmt.Errorf("ALTAR: expected WORK name after TO at %s:%d:%d",
 					tokens[i].File, tokens[i].Line, tokens[i].Column)
 			}
 			handlerName := tokens[i].Lexeme
@@ -2767,6 +2824,9 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 				for k, v := range parentSigils {
 					child[k] = v
 				}
+
+				// Inject request details into SIGILs
+				injectRequestSigils(child, r)
 
 				_, err := execWork(prog, work, child, false)
 				if err != nil {
@@ -2846,6 +2906,9 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 				for k, v := range parentSigils {
 					child[k] = v
 				}
+
+				// Inject request details into SIGILs
+				injectRequestSigils(child, r)
 
 				val, err := evalStringExpr(prog, exprCopy, child)
 				if err != nil {
