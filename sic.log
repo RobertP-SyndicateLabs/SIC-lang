@@ -1,0 +1,6 @@
+nohup: ignoring input
+[SIC SAY] Raising ALTAR demo.
+[SIC ALTAR] ALTAR awakening at :15080.
+[SIC ALTAR ROUTE] Route GET /hello -> handler HELLO
+[SIC ALTAR] HTTP server listening on :15080.
+[SIC ALTAR] ALTAR is now holding the process open on :15080.

@@ -59,6 +59,9 @@ const (
 	TOK_HANDLER  TokenType = "HANDLER"
 	TOK_SERVICE  TokenType = "SERVICE"
 
+	TOK_SEND TokenType = "SEND" // SEND
+	TOK_BACK TokenType = "BACK" // BACK (we already treat these as IDENTs sometimes, but ALTAR wants explicit tokens)
+
 	// Chambers / blocks / control
 	TOK_CHAMBER    TokenType = "CHAMBER"
 	TOK_ENDCHAMBER TokenType = "ENDCHAMBER"
@@ -67,8 +70,8 @@ const (
 	TOK_RELEASE  TokenType = "RELEASE"
 	TOK_CORE     TokenType = "CORE"
 
-        TOK_CHOIR     TokenType = "CHOIR"
-        TOK_ENDCHOIR  TokenType = "ENDCHOIR"
+	TOK_CHOIR    TokenType = "CHOIR"
+	TOK_ENDCHOIR TokenType = "ENDCHOIR"
 
 	TOK_IF   TokenType = "IF"
 	TOK_ELSE TokenType = "ELSE"
@@ -97,13 +100,24 @@ const (
 	TOK_LBRACE TokenType = "LBRACE" // {
 	TOK_RBRACE TokenType = "RBRACE" // }
 	TOK_EQUAL  TokenType = "EQUAL"  // =
-	TOK_PLUS   TokenType = "PLUS"   // +
-	TOK_LOG    TokenType = "LOG"    // LOG keyword or symbol
-	TOK_MINUS  TokenType = "MINUS"  // -
-	TOK_STAR   TokenType = "STAR"   // *
-	TOK_BANG   TokenType = "BANG"   // !
-	TOK_LT     TokenType = "LT"     // <
-	TOK_GT     TokenType = "GT"     // >
+
+	TOK_PLUS    TokenType = "PLUS"    // +
+	TOK_MINUS   TokenType = "MINUS"   // -
+	TOK_STAR    TokenType = "STAR"    // *
+	TOK_PERCENT TokenType = "PERCENT" // %
+	TOK_BANG    TokenType = "BANG"    // !
+	TOK_LT      TokenType = "LT"      // <
+	TOK_GT      TokenType = "GT"      // >
+	TOK_LTE     TokenType = "LTE"     // <=
+	TOK_GTE     TokenType = "GTE"     // >=
+	TOK_EQ      TokenType = "EQ"      // ==
+	TOK_NEQ     TokenType = "NEQ"     // !=
+
+	TOK_AND TokenType = "AND" // AND
+	TOK_OR  TokenType = "OR"  // OR
+	TOK_NOT TokenType = "NOT" // NOT
+
+	TOK_LOG TokenType = "LOG" // LOG keyword or symbol
 )
 
 // Token is the unified lexical unit used by lexer and parser.

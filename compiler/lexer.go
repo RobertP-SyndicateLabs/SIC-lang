@@ -161,22 +161,47 @@ func (l *Lexer) NextToken() Token {
 		return l.makeToken(TOK_LBRACE, "{", line, col)
 	case '}':
 		return l.makeToken(TOK_RBRACE, "}", line, col)
+
+	// Multi/single char operators:
+
 	case '=':
+		if l.ch == '=' { // look ahead
+			l.readRune()
+			return l.makeToken(TOK_EQ, "==", line, col)
+		}
 		return l.makeToken(TOK_EQUAL, "=", line, col)
+
+	case '!':
+		if l.ch == '=' {
+			l.readRune()
+			return l.makeToken(TOK_NEQ, "!=", line, col)
+		}
+		return l.makeToken(TOK_BANG, "!", line, col)
+
+	case '<':
+		if l.ch == '=' {
+			l.readRune()
+			return l.makeToken(TOK_LTE, "<=", line, col)
+		}
+		return l.makeToken(TOK_LT, "<", line, col)
+
+	case '>':
+		if l.ch == '=' {
+			l.readRune()
+			return l.makeToken(TOK_GTE, ">=", line, col)
+		}
+		return l.makeToken(TOK_GT, ">", line, col)
+
 	case '+':
 		return l.makeToken(TOK_PLUS, "+", line, col)
 	case '-':
 		return l.makeToken(TOK_MINUS, "-", line, col)
 	case '*':
 		return l.makeToken(TOK_STAR, "*", line, col)
-	case '!':
-		return l.makeToken(TOK_BANG, "!", line, col)
-	case '<':
-		return l.makeToken(TOK_LT, "<", line, col)
-	case '>':
-		return l.makeToken(TOK_GT, ">", line, col)
+	case '%':
+		return l.makeToken(TOK_PERCENT, "%", line, col)
+
 	default:
-		// Anything else is illegal for now
 		return l.makeToken(TOK_ILLEGAL, string(ch), line, col)
 	}
 }
@@ -310,13 +335,16 @@ var keywords = map[string]TokenType{
 	"ENDWEAVE.": TOK_ENDWEAVE, // defensive if someone writes ENDWEAVE. as one token
 	"ENDWEAVE:": TOK_ENDWEAVE, // likewise
 	"ENDWEAVE;": TOK_ENDWEAVE,
-        "CHOIR":     TOK_CHOIR,
-        "ENDCHOIR":  TOK_ENDCHOIR,
+	"CHOIR":     TOK_CHOIR,
+	"ENDCHOIR":  TOK_ENDCHOIR,
 
-	"AT":        TOK_AT,
-	"LEVEL":     TOK_LEVEL,
+	"AT":    TOK_AT,
+	"LEVEL": TOK_LEVEL,
 
 	"ARCWORK": TOK_ARCWORK,
+	"AND":     TOK_AND,
+	"OR":      TOK_OR,
+	"NOT":     TOK_NOT,
 
 	"ALTAR":    TOK_ALTAR,
 	"ENDALTAR": TOK_ENDALTAR,
@@ -328,6 +356,9 @@ var keywords = map[string]TokenType{
 	"DELETE":   TOK_DELETE,
 	"HANDLER":  TOK_HANDLER,
 	"SERVICE":  TOK_SERVICE,
+
+	"SEND": TOK_SEND,
+	"BACK": TOK_BACK,
 
 	"CHAMBER":    TOK_CHAMBER,
 	"ENDCHAMBER": TOK_ENDCHAMBER,
