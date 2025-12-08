@@ -2,24 +2,24 @@ package compiler
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
-        "net/http"
 )
 
 // ---- ALTAR runtime ----
 
 type altarServer struct {
-    addr    string
-    mux     *http.ServeMux
-    started bool
+	addr    string
+	mux     *http.ServeMux
+	started bool
 }
 
 var (
-    altarMu     sync.Mutex
-    globalAltar *altarServer
+	altarMu     sync.Mutex
+	globalAltar *altarServer
 )
 
 // Global entanglement state for the *current* CHAMBER.
@@ -177,6 +177,507 @@ func cleanWorkBody(raw []Token) []Token {
 	return raw
 }
 
+// ----- Expression engine types -----
+
+type exprKind int
+
+const (
+	exprText exprKind = iota
+	exprInt
+	exprFloat
+	exprBool
+)
+
+type exprValue struct {
+	kind exprKind
+	s    string
+	i    int64
+	f    float64
+	b    bool
+}
+
+func (v exprValue) String() string {
+	switch v.kind {
+	case exprInt:
+		return fmt.Sprintf("%d", v.i)
+	case exprFloat:
+		return fmt.Sprintf("%g", v.f)
+	case exprBool:
+		if v.b {
+			return "true"
+		}
+		return "false"
+	case exprText:
+		fallthrough
+	default:
+		return v.s
+	}
+}
+
+func makeText(s string) exprValue   { return exprValue{kind: exprText, s: s} }
+func makeInt(i int64) exprValue     { return exprValue{kind: exprInt, i: i} }
+func makeFloat(f float64) exprValue { return exprValue{kind: exprFloat, f: f} }
+func makeBool(b bool) exprValue     { return exprValue{kind: exprBool, b: b} }
+
+// Try to treat value as float (int promotes to float, text parsed if possible).
+func (v exprValue) asFloat() (float64, bool) {
+	switch v.kind {
+	case exprInt:
+		return float64(v.i), true
+	case exprFloat:
+		return v.f, true
+	case exprText:
+		if f, err := strconv.ParseFloat(strings.TrimSpace(v.s), 64); err == nil {
+			return f, true
+		}
+	case exprBool:
+		if v.b {
+			return 1, true
+		}
+		return 0, true
+	}
+	return 0, false
+}
+
+// Truthiness for boolean operators.
+func (v exprValue) asBool() bool {
+	switch v.kind {
+	case exprBool:
+		return v.b
+	case exprInt:
+		return v.i != 0
+	case exprFloat:
+		return v.f != 0
+	case exprText:
+		s := strings.TrimSpace(strings.ToLower(v.s))
+		if s == "true" {
+			return true
+		}
+		if s == "false" {
+			return false
+		}
+		return s != ""
+	default:
+		return false
+	}
+}
+
+// ----- Expression engine entry point -----
+//
+// evalStringExpr: given the tokens for an expression *and some trailing junk*,
+// evaluate and return a string value.
+//
+// All callers may safely pass a larger slice; we will stop at "stop tokens"
+// like DOT, COLON, FROM, TO, NEWLINE, ENDWORK, ENDWEAVE.
+func evalStringExpr(prog *Program, tokens []Token, sigils sigilTable) (string, error) {
+	if len(tokens) == 0 {
+		return "", nil
+	}
+
+	// Trim off trailing control tokens that are not part of the expression.
+	end := len(tokens)
+	for idx, tok := range tokens {
+		switch tok.Type {
+		case TOK_DOT,
+			TOK_COLON,
+			TOK_NEWLINE,
+			TOK_ENDWEAVE,
+			TOK_ENDWORK,
+			TOK_FROM:
+			end = idx
+			goto sliced
+		}
+	}
+sliced:
+	tokens = tokens[:end]
+	if len(tokens) == 0 {
+		return "", nil
+	}
+
+	i := 0
+	val, err := parseOr(prog, tokens, &i, sigils)
+	if err != nil {
+		return "", err
+	}
+	return val.String(), nil
+}
+
+// Precedence:
+//
+// OR
+// AND
+// Equality (==, !=)
+// Comparison (<, >, <=, >=)
+// Term (+, -)
+// Factor (*, /, %)
+// Unary (-, NOT)
+// Primary
+
+func parseOr(prog *Program, tokens []Token, i *int, sigils sigilTable) (exprValue, error) {
+	left, err := parseAnd(prog, tokens, i, sigils)
+	if err != nil {
+		return exprValue{}, err
+	}
+	for *i < len(tokens) && tokens[*i].Type == TOK_OR {
+		*i++
+		right, err := parseAnd(prog, tokens, i, sigils)
+		if err != nil {
+			return exprValue{}, err
+		}
+		left = makeBool(left.asBool() || right.asBool())
+	}
+	return left, nil
+}
+
+func parseAnd(prog *Program, tokens []Token, i *int, sigils sigilTable) (exprValue, error) {
+	left, err := parseEquality(prog, tokens, i, sigils)
+	if err != nil {
+		return exprValue{}, err
+	}
+	for *i < len(tokens) && tokens[*i].Type == TOK_AND {
+		*i++
+		right, err := parseEquality(prog, tokens, i, sigils)
+		if err != nil {
+			return exprValue{}, err
+		}
+		left = makeBool(left.asBool() && right.asBool())
+	}
+	return left, nil
+}
+
+func parseEquality(prog *Program, tokens []Token, i *int, sigils sigilTable) (exprValue, error) {
+	left, err := parseComparison(prog, tokens, i, sigils)
+	if err != nil {
+		return exprValue{}, err
+	}
+	for *i < len(tokens) &&
+		(tokens[*i].Type == TOK_EQ || tokens[*i].Type == TOK_NEQ) {
+
+		op := tokens[*i].Type
+		*i++
+		right, err := parseComparison(prog, tokens, i, sigils)
+		if err != nil {
+			return exprValue{}, err
+		}
+
+		var eq bool
+
+		if lf, okL := left.asFloat(); okL {
+			if rf, okR := right.asFloat(); okR {
+				eq = lf == rf
+			} else {
+				eq = left.String() == right.String()
+			}
+		} else {
+			eq = left.String() == right.String()
+		}
+
+		if op == TOK_EQ {
+			left = makeBool(eq)
+		} else {
+			left = makeBool(!eq)
+		}
+	}
+	return left, nil
+}
+
+func parseComparison(prog *Program, tokens []Token, i *int, sigils sigilTable) (exprValue, error) {
+	left, err := parseTerm(prog, tokens, i, sigils)
+	if err != nil {
+		return exprValue{}, err
+	}
+	for *i < len(tokens) &&
+		(tokens[*i].Type == TOK_LT ||
+			tokens[*i].Type == TOK_LTE ||
+			tokens[*i].Type == TOK_GT ||
+			tokens[*i].Type == TOK_GTE) {
+
+		op := tokens[*i].Type
+		*i++
+		right, err := parseTerm(prog, tokens, i, sigils)
+		if err != nil {
+			return exprValue{}, err
+		}
+
+		lf, okL := left.asFloat()
+		rf, okR := right.asFloat()
+
+		var res bool
+		if okL && okR {
+			switch op {
+			case TOK_LT:
+				res = lf < rf
+			case TOK_LTE:
+				res = lf <= rf
+			case TOK_GT:
+				res = lf > rf
+			case TOK_GTE:
+				res = lf >= rf
+			}
+		} else {
+			ls := left.String()
+			rs := right.String()
+			switch op {
+			case TOK_LT:
+				res = ls < rs
+			case TOK_LTE:
+				res = ls <= rs
+			case TOK_GT:
+				res = ls > rs
+			case TOK_GTE:
+				res = ls >= rs
+			}
+		}
+
+		left = makeBool(res)
+	}
+	return left, nil
+}
+
+func parseTerm(prog *Program, tokens []Token, i *int, sigils sigilTable) (exprValue, error) {
+	left, err := parseFactor(prog, tokens, i, sigils)
+	if err != nil {
+		return exprValue{}, err
+	}
+	for *i < len(tokens) &&
+		(tokens[*i].Type == TOK_PLUS || tokens[*i].Type == TOK_MINUS) {
+
+		op := tokens[*i].Type
+		*i++
+		right, err := parseFactor(prog, tokens, i, sigils)
+		if err != nil {
+			return exprValue{}, err
+		}
+
+		lf, okL := left.asFloat()
+		rf, okR := right.asFloat()
+
+		if okL && okR {
+			switch op {
+			case TOK_PLUS:
+				left = makeFloat(lf + rf)
+			case TOK_MINUS:
+				left = makeFloat(lf - rf)
+			}
+		} else {
+			if op == TOK_PLUS {
+				left = makeText(left.String() + right.String())
+			} else {
+				return exprValue{}, fmt.Errorf("cannot apply '-' to non-numeric values")
+			}
+		}
+	}
+	return left, nil
+}
+
+func parseFactor(prog *Program, tokens []Token, i *int, sigils sigilTable) (exprValue, error) {
+	left, err := parseUnary(prog, tokens, i, sigils)
+	if err != nil {
+		return exprValue{}, err
+	}
+	for *i < len(tokens) &&
+		(tokens[*i].Type == TOK_STAR ||
+			tokens[*i].Type == TOK_SLASH ||
+			tokens[*i].Type == TOK_PERCENT) {
+
+		op := tokens[*i].Type
+		*i++
+		right, err := parseUnary(prog, tokens, i, sigils)
+		if err != nil {
+			return exprValue{}, err
+		}
+
+		lf, okL := left.asFloat()
+		rf, okR := right.asFloat()
+		if !okL || !okR {
+			return exprValue{}, fmt.Errorf("non-numeric value in arithmetic")
+		}
+
+		switch op {
+		case TOK_STAR:
+			left = makeFloat(lf * rf)
+		case TOK_SLASH:
+			if rf == 0 {
+				return exprValue{}, fmt.Errorf("division by zero")
+			}
+			left = makeFloat(lf / rf)
+		case TOK_PERCENT:
+			li := int64(lf)
+			ri := int64(rf)
+			if ri == 0 {
+				return exprValue{}, fmt.Errorf("modulo by zero")
+			}
+			left = makeInt(li % ri)
+		}
+	}
+	return left, nil
+}
+
+func parseUnary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exprValue, error) {
+	if *i >= len(tokens) {
+		return exprValue{}, fmt.Errorf("unexpected end of expression")
+	}
+
+	tok := tokens[*i]
+
+	if tok.Type == TOK_MINUS {
+		*i++
+		val, err := parseUnary(prog, tokens, i, sigils)
+		if err != nil {
+			return exprValue{}, err
+		}
+		lf, ok := val.asFloat()
+		if !ok {
+			return exprValue{}, fmt.Errorf("cannot negate non-numeric value")
+		}
+		return makeFloat(-lf), nil
+	}
+
+	if tok.Type == TOK_NOT {
+		*i++
+		val, err := parseUnary(prog, tokens, i, sigils)
+		if err != nil {
+			return exprValue{}, err
+		}
+		return makeBool(!val.asBool()), nil
+	}
+
+	return parsePrimary(prog, tokens, i, sigils)
+}
+
+func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exprValue, error) {
+	if *i >= len(tokens) {
+		return exprValue{}, fmt.Errorf("unexpected end of expression")
+	}
+
+	tok := tokens[*i]
+
+	switch tok.Type {
+	case TOK_STRING:
+		*i++
+		return makeText(tok.Lexeme), nil
+
+	case TOK_SIGIL:
+		// consume '$'
+		*i++
+		if *i >= len(tokens) || tokens[*i].Type != TOK_IDENT {
+			return exprValue{}, fmt.Errorf("expected SIGIL name after $ at %s:%d:%d",
+				tok.File, tok.Line, tok.Column)
+		}
+		name := tokens[*i].Lexeme
+		*i++
+
+		val, ok := sigils[name]
+		if !ok {
+			return exprValue{}, fmt.Errorf("unknown SIGIL %s at %s:%d:%d",
+				name, tok.File, tok.Line, tok.Column)
+		}
+
+		// auto-interpret the sigil value like IDENT does
+		s := strings.TrimSpace(val)
+		if strings.EqualFold(s, "true") {
+			return makeBool(true), nil
+		}
+		if strings.EqualFold(s, "false") {
+			return makeBool(false), nil
+		}
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return makeFloat(f), nil
+		}
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return makeInt(n), nil
+		}
+
+		return makeText(val), nil
+
+	case TOK_NUM:
+		*i++
+		lex := strings.TrimSpace(tok.Lexeme)
+		if strings.ContainsAny(lex, ".eE") {
+			f, err := strconv.ParseFloat(lex, 64)
+			if err != nil {
+				return exprValue{}, fmt.Errorf("invalid float literal %q", lex)
+			}
+			return makeFloat(f), nil
+		}
+		n, err := strconv.ParseInt(lex, 10, 64)
+		if err != nil {
+			return exprValue{}, fmt.Errorf("invalid int literal %q", lex)
+		}
+		return makeInt(n), nil
+
+	case TOK_IDENT:
+		val, ok := sigils[tok.Lexeme]
+		if !ok {
+			return exprValue{}, fmt.Errorf("unknown SIGIL %s at %s:%d:%d",
+				tok.Lexeme, tok.File, tok.Line, tok.Column)
+		}
+		*i++
+		s := strings.TrimSpace(val)
+		if strings.EqualFold(s, "true") {
+			return makeBool(true), nil
+		}
+		if strings.EqualFold(s, "false") {
+			return makeBool(false), nil
+		}
+		if strings.ContainsAny(s, ".eE") {
+			if f, err := strconv.ParseFloat(s, 64); err == nil {
+				return makeFloat(f), nil
+			}
+		} else {
+			if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+				return makeInt(n), nil
+			}
+		}
+		return makeText(val), nil
+
+	case TOK_LPAREN:
+		*i++
+		inner, err := parseOr(prog, tokens, i, sigils)
+		if err != nil {
+			return exprValue{}, err
+		}
+		if *i >= len(tokens) || tokens[*i].Type != TOK_RPAREN {
+			return exprValue{}, fmt.Errorf("expected ')' in expression")
+		}
+		*i++
+		return inner, nil
+
+	case TOK_SUMMON:
+		// Allow SUMMON as an expression: delegate to existing summoning logic.
+		start := *i
+		val, consumed, err := evalSummonExpr(prog, tokens, start, sigils)
+		if err != nil {
+			return exprValue{}, err
+		}
+		*i = start + consumed
+		return makeText(val), nil
+	}
+
+	return exprValue{}, fmt.Errorf("unexpected %s in expression", tok.Type)
+}
+
+// Helper: interpret a SIGIL string as bool/int/float/text.
+func classifySigilValue(val string) exprValue {
+	s := strings.TrimSpace(val)
+	if strings.EqualFold(s, "true") {
+		return makeBool(true)
+	}
+	if strings.EqualFold(s, "false") {
+		return makeBool(false)
+	}
+	if strings.ContainsAny(s, ".eE") {
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return makeFloat(f)
+		}
+	} else {
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return makeInt(n)
+		}
+	}
+	return makeText(val)
+}
+
 // execWork runs a single WORK. If captureAnswer is true, it returns the
 // first THUS WE ANSWER / SEND BACK value instead of printing it.
 func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool) (string, error) {
@@ -311,13 +812,13 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 			i = next
 			continue
 
-                case TOK_ALTAR:
-                    next, err := execAltarBlock(prog, tokens, i, sigils)
-                    if err != nil {
-                        return "", err
-                    }
-                    i = next
-                    continue
+		case TOK_ALTAR:
+			next, err := execAltarBlock(prog, tokens, i, sigils)
+			if err != nil {
+				return "", err
+			}
+			i = next
+			continue
 
 		case TOK_SUMMON:
 			// Standalone SUMMON as a statement.
@@ -745,7 +1246,10 @@ func execThus(prog *Program, tokens []Token, i int, sigils sigilTable) (string, 
 // ---------------- SEND BACK ----------------
 
 // SEND BACK SIGIL name.
-// SEND BACK <expr>.   (fallback form)
+// SEND BACK <expr>.
+//
+// Returns the string value to the caller (WORK ANSWER, ALTAR handler, etc.)
+// and the new token index.
 func execSendBack(prog *Program, tokens []Token, i int, sigils sigilTable) (string, int, error) {
 	startTok := tokens[i] // "SEND"
 	i++
@@ -755,7 +1259,7 @@ func execSendBack(prog *Program, tokens []Token, i int, sigils sigilTable) (stri
 		return "", i, fmt.Errorf("SEND BACK: expected BACK after SEND at %s:%d:%d",
 			startTok.File, startTok.Line, startTok.Column)
 	}
-	i++
+	i++ // consume BACK
 
 	// Special-case: SEND BACK SIGIL name.
 	if i < len(tokens) && tokens[i].Type == TOK_SIGIL {
@@ -767,7 +1271,8 @@ func execSendBack(prog *Program, tokens []Token, i int, sigils sigilTable) (stri
 		name := tokens[i].Lexeme
 		val, _ := getSigil(sigils, name)
 		i++
-		// skip until DOT / NEWLINE / ENDWORK
+
+		// Skip until DOT / NEWLINE / ENDWORK
 		for i < len(tokens) &&
 			tokens[i].Type != TOK_DOT &&
 			tokens[i].Type != TOK_NEWLINE &&
@@ -780,7 +1285,8 @@ func execSendBack(prog *Program, tokens []Token, i int, sigils sigilTable) (stri
 		return val, i, nil
 	}
 
-	// Fallback: SEND BACK <expr>.
+	// General case: SEND BACK <expr>.
+	// First, find the end of the expression (DOT / NEWLINE / ENDWORK).
 	exprStart := i
 	for i < len(tokens) &&
 		tokens[i].Type != TOK_DOT &&
@@ -789,13 +1295,17 @@ func execSendBack(prog *Program, tokens []Token, i int, sigils sigilTable) (stri
 		i++
 	}
 
+	// Now evaluate just that slice.
 	val, err := evalStringExpr(prog, tokens[exprStart:i], sigils)
 	if err != nil {
 		return "", i, err
 	}
+
+	// Optional trailing DOT.
 	if i < len(tokens) && tokens[i].Type == TOK_DOT {
 		i++
 	}
+
 	return val, i, nil
 }
 
@@ -2025,11 +2535,15 @@ func execChoirBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 // ---------------- ALTAR / ROUTE Canticle ----------------
 //
 // ALTAR my_server AT PORT 15080:
-//     ROUTE GET "/hello" WITH HANDLER HELLO.
+//
+//	ROUTE GET "/hello" WITH HANDLER HELLO.
+//
 // ENDALTAR.
 //
 // ALTAR AT :15080:
-//   ROUTE GET "/hello" TO WORK HELLO.
+//
+//	ROUTE GET "/hello" TO WORK HELLO.
+//
 // ENDALTAR.
 //
 // v1 semantics:
@@ -2037,207 +2551,207 @@ func execChoirBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 // - Register each ROUTE inside this ALTAR block.
 // - Then block the main goroutine so the server stays alive.
 func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (int, error) {
-    startTok := tokens[i] // TOK_ALTAR
-    i++
+	startTok := tokens[i] // TOK_ALTAR
+	i++
 
-    // Expect: AT
-    if i >= len(tokens) || tokens[i].Type != TOK_AT {
-        return i, fmt.Errorf("ALTAR: expected AT after ALTAR at %s:%d:%d",
-            startTok.File, startTok.Line, startTok.Column)
-    }
-    i++
+	// Expect: AT
+	if i >= len(tokens) || tokens[i].Type != TOK_AT {
+		return i, fmt.Errorf("ALTAR: expected AT after ALTAR at %s:%d:%d",
+			startTok.File, startTok.Line, startTok.Column)
+	}
+	i++
 
-    // ---------- parse address after AT ----------
-    if i >= len(tokens) {
-        return i, fmt.Errorf("ALTAR: expected port or address after AT")
-    }
+	// ---------- parse address after AT ----------
+	if i >= len(tokens) {
+		return i, fmt.Errorf("ALTAR: expected port or address after AT")
+	}
 
-    var addr string
-    tok := tokens[i]
+	var addr string
+	tok := tokens[i]
 
-    switch tok.Type {
-    case TOK_STRING:
-        // e.g. ":15080" or "localhost:15080"
-        addr = tok.Lexeme
-        i++
+	switch tok.Type {
+	case TOK_STRING:
+		// e.g. ":15080" or "localhost:15080"
+		addr = tok.Lexeme
+		i++
 
-    case TOK_COLON:
-        // :15080
-        if i+1 >= len(tokens) || tokens[i+1].Type != TOK_NUM {
-            return i, fmt.Errorf("ALTAR: expected numeric port after ':' at %s:%d:%d",
-                tok.File, tok.Line, tok.Column)
-        }
-        addr = ":" + tokens[i+1].Lexeme
-        i += 2
+	case TOK_COLON:
+		// :15080
+		if i+1 >= len(tokens) || tokens[i+1].Type != TOK_NUM {
+			return i, fmt.Errorf("ALTAR: expected numeric port after ':' at %s:%d:%d",
+				tok.File, tok.Line, tok.Column)
+		}
+		addr = ":" + tokens[i+1].Lexeme
+		i += 2
 
-    case TOK_NUM:
-        // bare 15080 → ":15080"
-        addr = ":" + tok.Lexeme
-        i++
+	case TOK_NUM:
+		// bare 15080 → ":15080"
+		addr = ":" + tok.Lexeme
+		i++
 
-    default:
-        return i, fmt.Errorf("ALTAR: invalid address token %s at %s:%d:%d",
-            tok.Type, tok.File, tok.Line, tok.Column)
-    }
+	default:
+		return i, fmt.Errorf("ALTAR: invalid address token %s at %s:%d:%d",
+			tok.Type, tok.File, tok.Line, tok.Column)
+	}
 
-    // Optional colon after address: ALTAR AT :15080:
-    if i < len(tokens) && tokens[i].Type == TOK_COLON {
-        i++
-    }
+	// Optional colon after address: ALTAR AT :15080:
+	if i < len(tokens) && tokens[i].Type == TOK_COLON {
+		i++
+	}
 
-    fmt.Printf("[SIC ALTAR] ALTAR awakening at %s.\n", addr)
+	fmt.Printf("[SIC ALTAR] ALTAR awakening at %s.\n", addr)
 
-    // ---------- init / start server (singleton) ----------
-    altarMu.Lock()
-    if globalAltar == nil {
-        globalAltar = &altarServer{
-            addr: addr,
-            mux:  http.NewServeMux(),
-        }
-    } else if globalAltar.addr != addr {
-        prev := globalAltar.addr
-        altarMu.Unlock()
-        return i, fmt.Errorf("ALTAR: server already bound to %s, cannot rebind to %s",
-            prev, addr)
-    }
+	// ---------- init / start server (singleton) ----------
+	altarMu.Lock()
+	if globalAltar == nil {
+		globalAltar = &altarServer{
+			addr: addr,
+			mux:  http.NewServeMux(),
+		}
+	} else if globalAltar.addr != addr {
+		prev := globalAltar.addr
+		altarMu.Unlock()
+		return i, fmt.Errorf("ALTAR: server already bound to %s, cannot rebind to %s",
+			prev, addr)
+	}
 
-    srv := globalAltar
-    if !srv.started {
-        srv.started = true
-        go func(s *altarServer) {
-            fmt.Fprintf(os.Stderr, "[SIC ALTAR] HTTP server listening on %s.\n", s.addr)
-            if err := http.ListenAndServe(s.addr, s.mux); err != nil {
-                fmt.Fprintf(os.Stderr, "[SIC ALTAR] server error: %v\n", err)
-            }
-        }(srv)
-    }
-    altarMu.Unlock()
+	srv := globalAltar
+	if !srv.started {
+		srv.started = true
+		go func(s *altarServer) {
+			fmt.Fprintf(os.Stderr, "[SIC ALTAR] HTTP server listening on %s.\n", s.addr)
+			if err := http.ListenAndServe(s.addr, s.mux); err != nil {
+				fmt.Fprintf(os.Stderr, "[SIC ALTAR] server error: %v\n", err)
+			}
+		}(srv)
+	}
+	altarMu.Unlock()
 
-    // ---------- parse ROUTE statements ----------
-    for i < len(tokens) {
-        tok := tokens[i]
+	// ---------- parse ROUTE statements ----------
+	for i < len(tokens) {
+		tok := tokens[i]
 
-        // Skip blank lines
-        if tok.Type == TOK_NEWLINE {
-            i++
-            continue
-        }
+		// Skip blank lines
+		if tok.Type == TOK_NEWLINE {
+			i++
+			continue
+		}
 
-        // ENDALTAR.
-        if tok.Type == TOK_ENDALTAR {
-            i++
-            if i < len(tokens) && tokens[i].Type == TOK_DOT {
-                i++
-            }
-            break
-        }
+		// ENDALTAR.
+		if tok.Type == TOK_ENDALTAR {
+			i++
+			if i < len(tokens) && tokens[i].Type == TOK_DOT {
+				i++
+			}
+			break
+		}
 
-        if tok.Type != TOK_ROUTE {
-            return i, fmt.Errorf("ALTAR: expected ROUTE or ENDALTAR, found %s at %s:%d:%d",
-                tok.Type, tok.File, tok.Line, tok.Column)
-        }
-        i++ // after ROUTE
+		if tok.Type != TOK_ROUTE {
+			return i, fmt.Errorf("ALTAR: expected ROUTE or ENDALTAR, found %s at %s:%d:%d",
+				tok.Type, tok.File, tok.Line, tok.Column)
+		}
+		i++ // after ROUTE
 
-        // HTTP method
-        if i >= len(tokens) ||
-            !((tokens[i].Type == TOK_GET) ||
-                (tokens[i].Type == TOK_POST) ||
-                (tokens[i].Type == TOK_PUT) ||
-                (tokens[i].Type == TOK_DELETE)) {
-            return i, fmt.Errorf("ALTAR: expected HTTP method after ROUTE")
-        }
-        method := tokens[i].Lexeme
-        i++
+		// HTTP method
+		if i >= len(tokens) ||
+			!((tokens[i].Type == TOK_GET) ||
+				(tokens[i].Type == TOK_POST) ||
+				(tokens[i].Type == TOK_PUT) ||
+				(tokens[i].Type == TOK_DELETE)) {
+			return i, fmt.Errorf("ALTAR: expected HTTP method after ROUTE")
+		}
+		method := tokens[i].Lexeme
+		i++
 
-        // Path
-        if i >= len(tokens) {
-            return i, fmt.Errorf("ALTAR: missing path after method %s", method)
-        }
+		// Path
+		if i >= len(tokens) {
+			return i, fmt.Errorf("ALTAR: missing path after method %s", method)
+		}
 
-        var path string
-        if tokens[i].Type == TOK_STRING {
-            path = tokens[i].Lexeme
-            i++
-        } else {
-            path = tokens[i].Lexeme
-            i++
-        }
+		var path string
+		if tokens[i].Type == TOK_STRING {
+			path = tokens[i].Lexeme
+			i++
+		} else {
+			path = tokens[i].Lexeme
+			i++
+		}
 
-        // Expect IDENT "TO"
-        if i >= len(tokens) || !(tokens[i].Type == TOK_IDENT && tokens[i].Lexeme == "TO") {
-            return i, fmt.Errorf("ALTAR: expected TO after ROUTE %s %s", method, path)
-        }
-        i++
+		// Expect IDENT "TO"
+		if i >= len(tokens) || !(tokens[i].Type == TOK_IDENT && tokens[i].Lexeme == "TO") {
+			return i, fmt.Errorf("ALTAR: expected TO after ROUTE %s %s", method, path)
+		}
+		i++
 
-        // WORK
-        if i >= len(tokens) || tokens[i].Type != TOK_WORK {
-            return i, fmt.Errorf("ALTAR: expected WORK after TO at %s:%d:%d",
-                tokens[i].File, tokens[i].Line, tokens[i].Column)
-        }
-        i++
+		// WORK
+		if i >= len(tokens) || tokens[i].Type != TOK_WORK {
+			return i, fmt.Errorf("ALTAR: expected WORK after TO at %s:%d:%d",
+				tokens[i].File, tokens[i].Line, tokens[i].Column)
+		}
+		i++
 
-        // WORK name
-        if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
-            return i, fmt.Errorf("ALTAR: expected WORK name after TO WORK")
-        }
-        handlerName := tokens[i].Lexeme
-        i++
+		// WORK name
+		if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
+			return i, fmt.Errorf("ALTAR: expected WORK name after TO WORK")
+		}
+		handlerName := tokens[i].Lexeme
+		i++
 
-        // Optional DOT
-        if i < len(tokens) && tokens[i].Type == TOK_DOT {
-            i++
-        }
+		// Optional DOT
+		if i < len(tokens) && tokens[i].Type == TOK_DOT {
+			i++
+		}
 
-        fmt.Printf("[SIC ALTAR ROUTE] Route %s %s -> handler %s\n",
-            method, path, handlerName)
+		fmt.Printf("[SIC ALTAR ROUTE] Route %s %s -> handler %s\n",
+			method, path, handlerName)
 
-        // ---------- register HTTP handler ----------
-        altarMu.Lock()
+		// ---------- register HTTP handler ----------
+		altarMu.Lock()
 
-        // Copy locals to avoid closure capture weirdness
-        m := method
-        p := path
-        h := handlerName
-        parentSigils := sigils
+		// Copy locals to avoid closure capture weirdness
+		m := method
+		p := path
+		h := handlerName
+		parentSigils := sigils
 
-        srv.mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
-            if r.Method != m {
-                http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-                return
-            }
+		srv.mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != m {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
 
-            work := findWork(prog, h)
-            if work == nil {
-                fmt.Fprintf(os.Stderr, "[SIC ALTAR] handler WORK %s not found\n", h)
-                http.Error(w, "handler not found", http.StatusInternalServerError)
-                return
-            }
+			work := findWork(prog, h)
+			if work == nil {
+				fmt.Fprintf(os.Stderr, "[SIC ALTAR] handler WORK %s not found\n", h)
+				http.Error(w, "handler not found", http.StatusInternalServerError)
+				return
+			}
 
-            // Clone sigils like SUMMON does
-            child := make(sigilTable)
-            for k, v := range parentSigils {
-                child[k] = v
-            }
+			// Clone sigils like SUMMON does
+			child := make(sigilTable)
+			for k, v := range parentSigils {
+				child[k] = v
+			}
 
-            _, err := execWork(prog, work, child, false)
-            if err != nil {
-                fmt.Fprintf(os.Stderr, "[SIC ALTAR] handler %s error: %v\n", h, err)
-                http.Error(w, "internal error", http.StatusInternalServerError)
-                return
-            }
+			_, err := execWork(prog, work, child, false)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[SIC ALTAR] handler %s error: %v\n", h, err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
 
-            w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-            _, _ = w.Write([]byte("OK\n"))
-        })
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = w.Write([]byte("OK\n"))
+		})
 
-        altarMu.Unlock()
-    }
+		altarMu.Unlock()
+	}
 
-    // ---------- BLOCK HERE: keep process alive ----------
-    fmt.Fprintf(os.Stderr, "[SIC ALTAR] ALTAR is now holding the process open on %s.\n", addr)
-    select {} // block forever; never return to MAIN
-    // unreachable, but keeps compiler happy:
-    // return i, nil
+	// ---------- BLOCK HERE: keep process alive ----------
+	fmt.Fprintf(os.Stderr, "[SIC ALTAR] ALTAR is now holding the process open on %s.\n", addr)
+	select {} // block forever; never return to MAIN
+	// unreachable, but keeps compiler happy:
+	// return i, nil
 }
 
 // SUMMON as a statement: ignore the returned value, keep side-effects.
@@ -2264,81 +2778,6 @@ func execSummonStmt(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 }
 
 // ---------------- Expression evaluation (strings + SUMMON) ----------------
-
-// Very small expression engine for now:
-// - STRING literals
-// - SIGIL name references (SIGIL name OR bare name if bound)
-// - Concatenation with PLUS
-// - Embedded SUMMON WORK ... WITH SIGIL ...
-func evalStringExpr(prog *Program, tokens []Token, sigils sigilTable) (string, error) {
-	if len(tokens) == 0 {
-		return "", nil
-	}
-
-	out := ""
-	i := 0
-	expectValue := true
-
-	for i < len(tokens) {
-		tok := tokens[i]
-
-		if expectValue {
-			switch tok.Type {
-			case TOK_STRING:
-				out += tok.Lexeme
-				i++
-
-			case TOK_SIGIL:
-				i++
-				if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
-					return "", fmt.Errorf("expected SIGIL name after SIGIL at %s:%d:%d",
-						tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
-				}
-				name := tokens[i].Lexeme
-				val, _ := getSigil(sigils, name)
-				out += val
-				i++
-
-			case TOK_IDENT:
-				// Treat IDENT as a sigil reference if it exists in the table
-				if val, ok := sigils[tok.Lexeme]; ok {
-					out += val
-					i++
-				} else {
-					return "", fmt.Errorf("unexpected IDENT in expr: %s at %s:%d:%d",
-						tok.Lexeme, tok.File, tok.Line, tok.Column)
-				}
-
-			case TOK_SUMMON:
-				val, consumed, err := evalSummonExpr(prog, tokens, i, sigils)
-				if err != nil {
-					return "", err
-				}
-				out += val
-				i += consumed
-
-			default:
-				return "", fmt.Errorf("unexpected token in expr: %s at %s:%d:%d",
-					tok.Type, tok.File, tok.Line, tok.Column)
-			}
-			expectValue = false
-		} else {
-			// Expect PLUS
-			if tok.Type != TOK_PLUS {
-				return "", fmt.Errorf("expected '+' in expression, got %s at %s:%d:%d",
-					tok.Type, tok.File, tok.Line, tok.Column)
-			}
-			i++
-			expectValue = true
-		}
-	}
-
-	if expectValue {
-		return "", fmt.Errorf("incomplete expression, trailing '+'")
-	}
-
-	return out, nil
-}
 
 // SUMMON expression:
 //
@@ -2412,4 +2851,85 @@ func evalSummonExpr(prog *Program, tokens []Token, start int, sigils sigilTable)
 
 	consumed := i - start
 	return result, consumed, nil
+}
+
+func evalExpr(prog *Program, tokens []Token, i int, sigils sigilTable) (string, int, error) {
+	start := i
+
+	// ---- Parse left operand ----
+	leftTok := tokens[i]
+	var leftVal string
+
+	switch leftTok.Type {
+	case TOK_IDENT:
+		v, ok := sigils[leftTok.Lexeme]
+		if !ok {
+			return "", 0, fmt.Errorf("unknown SIGIL %s at %s:%d:%d",
+				leftTok.Lexeme, leftTok.File, leftTok.Line, leftTok.Column)
+		}
+		leftVal = v
+		i++
+
+	case TOK_STRING:
+		leftVal = leftTok.Lexeme
+		i++
+
+	case TOK_NUM:
+		leftVal = leftTok.Lexeme
+		i++
+
+	default:
+		return "", 0, fmt.Errorf("unexpected %s in expr at %s:%d:%d",
+			leftTok.Type, leftTok.File, leftTok.Line, leftTok.Column)
+	}
+
+	// ---- Check if there's an operator ----
+	if i >= len(tokens) || tokens[i].Type != TOK_PLUS {
+		// Single value expression
+		return leftVal, i - start, nil
+	}
+
+	// We saw a +
+	i++ // consume +
+
+	// ---- Parse right operand ----
+	if i >= len(tokens) {
+		return "", 0, fmt.Errorf("expected right operand after +")
+	}
+
+	rightTok := tokens[i]
+	var rightVal string
+
+	switch rightTok.Type {
+	case TOK_IDENT:
+		v, ok := sigils[rightTok.Lexeme]
+		if !ok {
+			return "", 0, fmt.Errorf("unknown SIGIL %s", rightTok.Lexeme)
+		}
+		rightVal = v
+		i++
+
+	case TOK_STRING:
+		rightVal = rightTok.Lexeme
+		i++
+
+	case TOK_NUM:
+		rightVal = rightTok.Lexeme
+		i++
+
+	default:
+		return "", 0, fmt.Errorf("unexpected %s after +", rightTok.Type)
+	}
+
+	// ---- Evaluate the expression ----
+
+	// Try numeric addition first
+	if lv, err1 := strconv.Atoi(leftVal); err1 == nil {
+		if rv, err2 := strconv.Atoi(rightVal); err2 == nil {
+			return fmt.Sprintf("%d", lv+rv), i - start, nil
+		}
+	}
+
+	// Otherwise: string concatenation
+	return leftVal + rightVal, i - start, nil
 }
