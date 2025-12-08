@@ -1,92 +1,298 @@
-## Supporting SIC
+SIC-lang — The Ritual Orchestration Language
 
-If you value the direction and development of SIC, you can support the project through GitHub Sponsors:
+v0.3 — Expression Canticle
 
-https://github.com/sponsors/RobertP-SyndicateLabs
-
-Your support accelerates development and helps move SIC toward a complete, production-grade ecosystem.
-# ===============================================================
-
-SIC-lang
-
-The SIC Reference Interpreter — v0.1 (Active Development)
-
-SIC is a disciplined, intention-driven language system designed to unify how humans express behavior, state, orchestration, and service interaction to machines.
-This repository contains the official reference interpreter and runtime for SIC’s CHANT dialect.
-
-SIC is not a framework, and not “another syntax.”
-It is a structured method of describing what systems must do — explicitly, deterministically, and responsibly.
+A language of intention, discipline, and deterministic orchestration.
 
 
 
 
-Purpose
+What is SIC?
 
-Modern development fragments intent across many languages and tools.
-SIC eliminates that fragmentation.
+SIC is a human-readable orchestration language designed to unify how humans—and AI systems—express:
 
-SIC provides:
+behavior
 
-WORKS — explicit units of executable intention
+state
 
-SIGILS — named state
+parallel execution
 
-EPHEMERAL SIGILS — protected, scoped state
+error handling
 
-IF / WHILE — deterministic flow
+service interactions
 
-OMENS — structured failure semantics
-
-FALLS_TO_RUIN — recovery and alternative paths
-
-WEAVE — orchestrated sequential and parallel operations
-
-SUMMON — calling WORKS with bound state
-
-ALTARS — service endpoints and dispatch logic
-
-SCRIBE — structured, deterministic output
-
-SIC_D — general-purpose dialect (in design)
+structured workflows
 
 
-SIC is a unifying language system intended to bring clarity, intention, and responsibility back to software construction.
+SIC is not “just another syntax.”
+It is a ceremonial programming model that treats computation as intention, action, and consequence.
+
+It reads like a scroll.
+It executes like a workflow engine.
+It behaves like a disciplined runtime.
+
+SIC is built on four pillars:
+
+1. Intention — explicit behavior via WORKS
+
+
+2. Responsibility — deterministic failure, recovery, scoping
+
+
+3. Orchestration — parallel, sequential, distributed execution
+
+
+4. Clarity — no hidden state, no ambiguity, no magic
+
+
+
+SIC is currently implemented in its CHANT dialect:
+a structured execution language with strict semantics and human-legible control flow.
 
 
 
 
-Repository Contents
+Why SIC Exists
 
-.
-├── cli/            # SIC command-line entry point
+Modern development fragments intent across:
+
+Bash scripts
+
+Python automations
+
+YAML pipelines
+
+Kubernetes operators
+
+Workflow engines
+
+HTTP services
+
+configuration files
+
+state machines
+
+
+This leads to brittle systems, unclear behavior, and human error.
+
+SIC unifies all of it.
+
+SIC provides a single, explicit, deterministic language for expressing:
+
+workflows
+
+automation
+
+distributed service calls
+
+stateful systems
+
+orchestration logic
+
+parallel tasks
+
+error behavior
+
+endpoint routing
+
+
+No more YAML → Go → Bash → Python → JSON → Terraform → back to YAML.
+
+Just SIC.
+
+
+
+Key SIC Concepts
+
+WORK — Units of intention
+
+WORK GREET WITH SIGIL name AS TEXT:
+    SAY: "Hello, " + name + ".".
+ENDWORK.
+
+SIGIL — Named state
+
+SIGIL mood BE "joyful".
+
+EPHEMERAL SIGIL — Auto-scrubbed scoped state
+
+EPHEMERAL SIGIL temp BE "secret".
+
+SUMMON — Call a WORK with bound state
+
+SUMMON GREET WITH name AS "Ada".
+
+SEND BACK — Returning values from a WORK
+
+SEND BACK "Done.".
+
+IF / WHILE — Deterministic control flow
+
+WHILE count < 3:
+    SAY: count.
+    LET count BE count + 1.
+ENDWHILE.
+
+OMEN / FALLS_TO_RUIN — Structured failure handling
+
+OMEN "network_down":
+    RAISE OMEN "network_down".
+FALLS_TO_RUIN:
+    SAY: "Recovered.".
+ENDOMEN.
+
+WEAVE / CHOIR — Sequential or parallel orchestration
+
+WEAVE:
+    SING TASK_A.
+    SING TASK_B.
+ENDWEAVE.
+
+CHAMBER / ENTANGLE / RELEASE — Scoped ownership discipline
+
+Think “Rust-like borrow checking,” but ritualistic.
+
+ALTAR — HTTP service endpoints
+
+ALTAR AT :8080:
+    ROUTE GET "/hello" TO WORK HELLO.
+ENDALTAR.
+
+(Full SEND BACK → HTTP response integration arriving in v0.4)
+
+
+
+
+Current Status — v0.3 Expression Canticle
+
+✔ Fully implemented:
+
+Parser + lexer + runtime
+
+WORK execution model
+
+SIGIL state system
+
+LET mutation
+
+EPHEMERAL sigils with auto-clean
+
+IF / WHILE
+
+SUMMON
+
+SEND BACK return semantics
+
+OMEN / FALLS / FALLS_TO_RUIN
+
+WEAVE orchestration
+
+CHOIR (sequential baseline)
+
+CHAMBER scoping
+
+ENTANGLE / RELEASE (ownership discipline)
+
+Expression engine with:
+
+arithmetic
+
+boolean logic
+
+comparisons
+
+nested expressions
+
+SUMMON as expression
+
+
+ALTAR: HTTP server with routing (v0.3)
+
+17 example scrolls demonstrating the system
+
+
+In progress:
+
+ALTAR → HTTP-response SEND BACK support
+
+CHOIR worker pool (true parallel execution)
+
+Richer diagnostics
+
+Typed sigils visualizer
+
+
+Coming soon (v0.4+):
+
+Remote SUMMON (cross-process workflows)
+
+Persistent CHAMBERs (stateful storage)
+
+Scheduler: EVERY N SECONDS:
+
+SIC_D dialect (general-purpose canonical layer)
+
+SIC_VM (bytecode execution engine)
+
+Cluster orchestration model
+
+SIC → Go/Python transpiler
+
+
+
+Example: ALTAR service (live HTTP endpoint)
+
+LANGUAGE "SIC 1.0".
+SCROLL altar_demo
+MODE CHANT.
+
+WORK HELLO WITH SIGIL UNUSED AS TEXT:
+    SEND BACK "Hello from SIC!".
+ENDWORK.
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+    SAY: "Raising ALTAR.".
+    ALTAR AT :15080:
+        ROUTE GET "/hello" TO WORK HELLO.
+    ENDALTAR.
+
+    SAY: "ALTAR active.".
+
+    SIGIL forever BE "yes".
+    WHILE forever IS "yes":
+        SLEEP 1000.
+    ENDWHILE.
+ENDWORK.
+
+Run:
+
+go build -o sic ./cli
+./sic run examples/altar_demo.sic
+
+Then:
+
+curl http://localhost:15080/hello
+
+
+
+Repository Structure
+
+SIC-lang/
+├── cli/               # CLI entry point
 ├── compiler/
-│   ├── lexer.go    # SIC tokenizer
-│   ├── parser.go   # SIC CHANT parser + Program/WorkDecl model
-│   ├── runtime.go  # SIC interpreter and evaluator
-│   └── tokens.go   # token definitions
-├── examples/       # Complete demo scrolls
-│   ├── hello_plus.sic
-│   ├── summon_demo.sic
-│   ├── while_demo.sic
-│   ├── omen_demo.sic
-│   ├── altar_demo.sic
-│   ├── ephemeral_demo.sic
-│   └── more...
+│   ├── lexer.go       # tokenization
+│   ├── parser.go      # AST + WorkDecl builder
+│   ├── runtime.go     # execution engine
+│   └── tokens.go
+├── examples/          # full working SIC scrolls
+├── scrolls/           # design scrolls & philosophy
 ├── go.mod
 ├── LICENSE
-└── README.md       # (You are reading this)
-
-Everything in compiler/ forms the CHANT-level implementation of SIC v1.0 concepts.
+└── README.md
 
 
 
-
-Building the SIC Interpreter
-
-Prerequisites:
-
-Go 1.21+
-
+Building & Running
 
 Build:
 
@@ -94,162 +300,87 @@ go build -o sic ./cli
 
 Run a SIC scroll:
 
-./sic run ./examples/hello_plus.sic
+./sic run examples/hello_plus.sic
 
 
 
-
-Current Language Features (Implemented)
-
-✔ WORKS
-
-WORK MAIN WITH SIGIL name AS TEXT:
-    SAY: "Hello, " + name + "!".
-ENDWORK.
-
-✔ SIGILS / LET
-
-LET SIGIL count BE 0.
-
-✔ EPHEMERAL SIGILS
-
-EPHEMERAL SIGIL temp BE "secret".
-
-✔ SUMMON
-
-SUMMON GREETING WITH name AS "World".
-
-✔ IF / ELSE
-
-IF SIGIL count EQUALS 3 THEN:
-    SAY: "Matched.".
-END IF.
-
-✔ WHILE
-
-WHILE SIGIL count LESS_THAN 3:
-    SAY: count.
-    LET SIGIL count BE count + 1.
-ENDWHILE.
-
-✔ OMENS (try/catch semantics)
-
-OMEN "network_failure":
-    RAISE OMEN "network_failure".
-FALLS_TO_RUIN:
-    SAY: "Recovered".
-ENDOMEN.
-
-✔ WEAVE
-
-Sequential multi-work weaving with correct flow semantics.
-
-✔ ALTAR (stubbed HTTP service)
-
-Parses and registers HTTP routes; full service engine coming soon.
-
-
-
-
-Examples
-
-Run any example:
-
-./sic run ./examples/while_demo.sic
-
-Output:
-
-[SIC SAY] Entering WHILE demo.
-[SIC SAY] Loop turn 0.
-[SIC SAY] Loop turn 1.
-[SIC SAY] Loop turn 2.
-WHILE demo complete.
-
-
-
-
-Development Status
-
-SIC-lang is under active, rapid development.
-
-Completed:
-
-CHANT interpreter
-
-Lexer, parser, runtime
-
-OMENS, SUMMON, WEAVE, EPHEMERAL, WHILE
-
-ALTAR (parses & logs routes)
-
-
-In Progress:
-
-SIC_D dialect (general-purpose canonical layer)
-
-Full evaluator and analyzer
-
-ARCWORK parallel execution model
-
-Formal CANON type system
-
-
-Planned:
-
-Service runtime
-
-Multi-threaded weaving
-
-Cross-language bridges
-
-Deterministic serializer
-
-SIC → other languages transpilers
-
-
-
-
-
-Philosophy (Summary)
+Philosophy
 
 SIC is a language of responsibility.
-It is designed to express intention clearly, deterministically, and without ambiguity.
 
-Its purpose is not replacement for its own sake —
-but simplification, unification, and mastery of system behavior without fragmentation.
+Where most languages obscure intention with syntax, mutation, and ambiguity, SIC makes intention explicit.
+It treats behavior as ceremony.
+It treats state as something to be honored.
+It treats failure as something to be handled with dignity.
 
-Full philosophy scrolls are available in:
-
-SIC-scrolls/
-
+Its aesthetic is ritual.
+Its purpose is clarity.
+Its goal is to unify how humans command machines.
 
 
 
 Contributing
 
-SIC is open for feedback and discussion.
-Code contributions will open after the analyzer and SIC_D scaffolding is complete.
+SIC is under active development.
+Feedback, issues, and scroll contributions are welcome.
 
-For now:
+Code contributions will open formally once:
 
-open issues
+SIC_D dialect structure stabilizes
 
-share feedback
+The analyzer subsystem begins
 
-follow development on LinkedIn
+ALTAR completes its full service semantics
 
-or become a sponsor
+
+Meanwhile, please:
+
+Open issues
+
+Propose features
+
+Discuss SIC’s growth
+
+Sponsor development
+
+
+
+Supporting SIC
+
+If you value the mission and want SIC to reach its full potential:
+
+https://github.com/sponsors/RobertP-SyndicateLabs
+
+Your support accelerates:
+
+the SIC virtual machine
+
+distributed SUMMON
+
+persistent CHAMBERs
+
+the analyzer
+
+the official SIC_D dialect
+
+documentation and onboarding
+
+
 
 
 
 License
 
-The reference interpreter is released under Apache 2.0.
+Apache 2.0 — allowing open experimentation, commercial adoption, and research use.
 
 
 
-Support the Project
+SIC is a language built not just to run — but to endure.
 
-If SIC’s mission resonates with you, you can support ongoing development through GitHub Sponsors:
+If you’re ready, proceed to the scrolls.
+If you’re brave, read the CHANT.
+If you’re foolish, summon a CHOIR.
 
-https://github.com/sponsors/RobertP-SyndicateLabs
+And if you’re wise —
+
+SIC will orchestrate your systems.
