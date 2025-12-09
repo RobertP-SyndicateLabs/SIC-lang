@@ -2617,6 +2617,21 @@ func injectRequestSigils(child sigilTable, r *http.Request) {
 	}
 }
 
+// chooseContentType picks the HTTP Content-Type for an ALTAR response.
+// Priority:
+//  1. SIGIL response_content_type (if set by the WORK or inline route)
+//  2. ".json" suffix on the route path -> application/json
+//  3. fallback to the provided defaultCT.
+func chooseContentType(defaultCT, path string, sigils sigilTable) string {
+	if ct, ok := sigils["response_content_type"]; ok && ct != "" {
+		return ct
+	}
+	if strings.HasSuffix(path, ".json") {
+		return "application/json; charset=utf-8"
+	}
+	return defaultCT
+}
+
 // ---------------- ALTAR / ROUTE Canticle ----------------
 //
 // ALTAR my_server AT PORT 15080:
@@ -2828,15 +2843,25 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 				// Inject request details into SIGILs
 				injectRequestSigils(child, r)
 
-				_, err := execWork(prog, work, child, false)
+				// Capture the ritual's answer as HTTP body
+				body, err := execWork(prog, work, child, true /* captureAnswer */)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "[SIC ALTAR] handler %s error: %v\n", h, err)
 					http.Error(w, "internal error", http.StatusInternalServerError)
 					return
 				}
 
-				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-				_, _ = w.Write([]byte("OK\n"))
+				if body == "" {
+					body = "OK"
+				}
+
+				// Decide Content-Type:
+				// - SIGIL response_content_type wins if set,
+				// - else .json suffix -> application/json,
+				// - else fall back to text/plain.
+				ct := chooseContentType("text/plain; charset=utf-8", p, child)
+				w.Header().Set("Content-Type", ct)
+				_, _ = w.Write([]byte(body + "\n"))
 			})
 
 			altarMu.Unlock()
@@ -2917,7 +2942,9 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 					return
 				}
 
-				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				// Same content-type logic as WORK handlers
+				ct := chooseContentType("text/plain; charset=utf-8", p, child)
+				w.Header().Set("Content-Type", ct)
 				_, _ = w.Write([]byte(val + "\n"))
 			})
 
