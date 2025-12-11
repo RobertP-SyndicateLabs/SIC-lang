@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ---- ALTAR runtime ----
@@ -554,10 +555,12 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 	tok := tokens[*i]
 
 	switch tok.Type {
+	// "foo"
 	case TOK_STRING:
 		*i++
 		return makeText(tok.Lexeme), nil
 
+	// $SIGIL or $TIME_NOW
 	case TOK_SIGIL:
 		// consume '$'
 		*i++
@@ -565,13 +568,20 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 			return exprValue{}, fmt.Errorf("expected SIGIL name after $ at %s:%d:%d",
 				tok.File, tok.Line, tok.Column)
 		}
-		name := tokens[*i].Lexeme
+		nameTok := tokens[*i]
+		name := nameTok.Lexeme
 		*i++
+
+		// Built-in pseudo-sigil $TIME_NOW
+		if strings.EqualFold(name, "TIME_NOW") {
+			now := time.Now().Unix()
+			return makeText(fmt.Sprintf("%d", now)), nil
+		}
 
 		val, ok := sigils[name]
 		if !ok {
 			return exprValue{}, fmt.Errorf("unknown SIGIL %s at %s:%d:%d",
-				name, tok.File, tok.Line, tok.Column)
+				name, nameTok.File, nameTok.Line, nameTok.Column)
 		}
 
 		// auto-interpret the sigil value like IDENT does
@@ -588,9 +598,9 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
 			return makeInt(n), nil
 		}
-
 		return makeText(val), nil
 
+	// 123 or 3.14
 	case TOK_NUM:
 		*i++
 		lex := strings.TrimSpace(tok.Lexeme)
@@ -607,7 +617,15 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 		}
 		return makeInt(n), nil
 
+	// IDENT: SIGIL lookup, except TIME_NOW
 	case TOK_IDENT:
+		// Built-in bare TIME_NOW (no sigil needed)
+		if strings.EqualFold(tok.Lexeme, "TIME_NOW") {
+			*i++
+			now := time.Now().Unix()
+			return makeText(fmt.Sprintf("%d", now)), nil
+		}
+
 		val, ok := sigils[tok.Lexeme]
 		if !ok {
 			return exprValue{}, fmt.Errorf("unknown SIGIL %s at %s:%d:%d",

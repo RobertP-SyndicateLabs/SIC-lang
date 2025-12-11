@@ -1,0 +1,23 @@
+LANGUAGE "SIC 1.0".
+SCROLL altar_mirrors_demo
+MODE CHANT.
+
+WORK ECHO_JSON WITH SIGIL body AS TEXT:
+  SAY: "Binding JSON from incoming body.".
+
+  BIND JSON FROM body AS SIGIL cfg.
+
+  SAY: "Writing JSON back out.".
+  WRITE JSON cfg AS TEXT INTO SIGIL out.
+
+  SEND BACK out.
+ENDWORK.
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+  SAY: "Raising ALTAR MIRRORS demo.".
+
+  ALTAR AT :15080:
+    ROUTE POST "/echo" TO WORK ECHO_JSON.
+  ENDALTAR.
+
+ENDWORK.

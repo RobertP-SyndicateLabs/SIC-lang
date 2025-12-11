@@ -1,0 +1,21 @@
+LANGUAGE "SIC 1.0".
+SCROLL threads_demo
+MODE CHANT.
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+  SAY: "Entering THREADS demo.".
+
+  LET SIGIL NOW BE TIME_NOW.
+  SAY: "Current time (epoch seconds) is " + NOW + ".".
+
+  SAY: "Sleeping for 2 seconds...".
+  SLEEP FOR 2 SECONDS.
+  SAY: "Woke after static sleep.".
+
+  LET SIGIL DELAY BE 1 + 1.
+  SAY: "Sleeping for " + DELAY + " seconds (expression).".
+  SLEEP FOR DELAY SECONDS.
+  SAY: "Woke after expression sleep.".
+
+  SAY: "THREADS demo complete.".
+ENDWORK.
