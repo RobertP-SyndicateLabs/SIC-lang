@@ -1,2 +1,6 @@
 sic
 sic.log
+
+# build artifacts
+sic
+*.log
