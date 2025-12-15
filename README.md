@@ -384,3 +384,6 @@ If you’re foolish, summon a CHOIR.
 And if you’re wise —
 
 SIC will orchestrate your systems.
+
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![CI](https://github.com/RobertP-SyndicateLabs/SIC-lang/actions/workflows/ci.yml/badge.svg)](https://github.com/RobertP-SyndicateLabs/SIC-lang/actions)
