@@ -1,5 +1,8 @@
 SIC-lang — The Ritual Orchestration Language
 
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![CI](https://github.com/RobertP-SyndicateLabs/SIC-lang/actions/workflows/ci.yml/badge.svg)](https://github.com/RobertP-SyndicateLabs/SIC-lang/actions)
+
 v0.3 — Expression Canticle
 
 A language of intention, discipline, and deterministic orchestration.
@@ -100,6 +103,15 @@ No more YAML → Go → Bash → Python → JSON → Terraform → back to YAML.
 
 Just SIC.
 
+Who SIC Is For
+
+SIC is designed for:
+
+- Engineers building orchestration-heavy systems
+- Teams managing workflows, automation, and services
+- Developers tired of YAML-driven complexity
+- Researchers exploring deterministic execution models
+- AI systems that must express intent safely and explicitly
 
 
 Key SIC Concepts
@@ -384,6 +396,3 @@ If you’re foolish, summon a CHOIR.
 And if you’re wise —
 
 SIC will orchestrate your systems.
-
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
-[![CI](https://github.com/RobertP-SyndicateLabs/SIC-lang/actions/workflows/ci.yml/badge.svg)](https://github.com/RobertP-SyndicateLabs/SIC-lang/actions)
