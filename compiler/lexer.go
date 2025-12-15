@@ -162,6 +162,9 @@ func (l *Lexer) NextToken() Token {
 	case '}':
 		return l.makeToken(TOK_RBRACE, "}", line, col)
 
+        case '$':
+                return l.makeToken(TOK_DOLLAR, "$", line, col)
+
 	// Multi/single char operators:
 
 	case '=':
@@ -366,10 +369,15 @@ var keywords = map[string]TokenType{
 	"ENTANGLE": TOK_ENTANGLE,
 	"RELEASE":  TOK_RELEASE,
 	"CORE":     TOK_CORE,
+	"BIND":     TOK_BIND,
 
 	"IF":   TOK_IF,
 	"ELSE": TOK_ELSE,
 	"END":  TOK_END,
+        "ENDIF":  TOK_END,
+        "ENDIF.": TOK_END,
+        "ENDIF:": TOK_END,
+        "ENDIF;": TOK_END,
 
 	// loop keywords
 	"WHILE":     TOK_WHILE,
@@ -390,4 +398,10 @@ var keywords = map[string]TokenType{
 
 	"LOG":    TOK_LOG,
 	"SCRIBE": TOK_LOG,
+
+	// Time
+	"TIME_NOW": TOK_TIME_NOW,
+	"SLEEP":    TOK_SLEEP,
+	"FOR":      TOK_FOR,
+	"SECONDS":  TOK_SECONDS,
 }

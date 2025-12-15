@@ -1,0 +1,25 @@
+LANGUAGE "SIC 1.0".
+SCROLL heartbeat_demo
+MODE CHANT.
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+  SAY: "Entering HEARTBEAT demo.".
+
+  SAY: "Heartbeat 1.".
+  LET $T1 BE TIME_NOW.
+  SAY: "  At time (epoch seconds): " + $T1 + ".".
+  SAY: "  Sleeping for 1 second...".
+  SLEEP FOR 1 SECONDS.
+
+  SAY: "Heartbeat 2.".
+  LET $T2 BE TIME_NOW.
+  SAY: "  At time (epoch seconds): " + $T2 + ".".
+  SAY: "  Sleeping for 1 second...".
+  SLEEP FOR 1 SECONDS.
+
+  SAY: "Heartbeat 3.".
+  LET $T3 BE TIME_NOW.
+  SAY: "  At time (epoch seconds): " + $T3 + ".".
+
+  SAY: "HEARTBEAT demo complete.".
+ENDWORK.

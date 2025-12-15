@@ -1,0 +1,37 @@
+LANGUAGE "SIC 1.0".
+SCROLL rate_limit_demo
+MODE CHANT.
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+  SAY: "Entering RATE_LIMIT demo.".
+
+  SAY: "Performing first action (always allowed).".
+  LET $FIRST_TIME BE TIME_NOW.
+  SAY: "First action at: " + $FIRST_TIME + ".".
+
+  SAY: "Simulating a too-fast retry after 2 seconds.".
+  SLEEP FOR 2 SECONDS.
+  LET $SECOND_TIME BE TIME_NOW.
+  LET $DELTA1 BE $SECOND_TIME - $FIRST_TIME.
+  SAY: "Second attempt after " + $DELTA1 + " seconds.".
+
+  IF $DELTA1 < 5 THEN:
+    SAY: "Result: BLOCKED (cooldown is 5 seconds).".
+  ELSE:
+    SAY: "Result: ALLOWED.".
+  ENDIF.
+
+  SAY: "Simulating a slower retry after 5 seconds.".
+  SLEEP FOR 5 SECONDS.
+  LET $THIRD_TIME BE TIME_NOW.
+  LET $DELTA2 BE $THIRD_TIME - $SECOND_TIME.
+  SAY: "Third attempt after " + $DELTA2 + " seconds.".
+
+  IF $DELTA2 < 5 THEN:
+    SAY: "Result: BLOCKED (still within cooldown).".
+  ELSE:
+    SAY: "Result: ALLOWED (cooldown satisfied).".
+  ENDIF.
+
+  SAY: "RATE_LIMIT demo complete.".
+ENDWORK.

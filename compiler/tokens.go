@@ -100,6 +100,7 @@ const (
 	TOK_LBRACE TokenType = "LBRACE" // {
 	TOK_RBRACE TokenType = "RBRACE" // }
 	TOK_EQUAL  TokenType = "EQUAL"  // =
+        TOK_DOLLAR TokenType = "DOLLAR" // $
 
 	TOK_PLUS    TokenType = "PLUS"    // +
 	TOK_MINUS   TokenType = "MINUS"   // -
@@ -118,6 +119,15 @@ const (
 	TOK_NOT TokenType = "NOT" // NOT
 
 	TOK_LOG TokenType = "LOG" // LOG keyword or symbol
+
+	// Time / scheduling
+	TOK_TIME_NOW TokenType = "TIME_NOW"
+	TOK_SLEEP    TokenType = "SLEEP"
+	TOK_FOR      TokenType = "FOR"
+	TOK_SECONDS  TokenType = "SECONDS"
+
+	// Binding / assignment-style keyword (if you're using it anywhere)
+	TOK_BIND TokenType = "BIND"
 )
 
 // Token is the unified lexical unit used by lexer and parser.

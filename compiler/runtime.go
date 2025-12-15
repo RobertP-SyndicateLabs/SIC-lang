@@ -264,6 +264,82 @@ func (v exprValue) asBool() bool {
 	}
 }
 
+func isWord(tok Token, w string) bool {
+	return tok.Type == TOK_IDENT && strings.EqualFold(tok.Lexeme, w)
+}
+
+func lexemeIs(tok Token, w string) bool {
+	// Matches keyword tokens that still carry lexeme, and IDENT fallback.
+	return strings.EqualFold(tok.Lexeme, w)
+}
+
+// normalizeExprTokens rewrites legacy/statement-style tokens into expression-style tokens.
+// This lets your parseOr()/parsePrimary() expression engine evaluate things like:
+//
+//	SIGIL name EQUALS "World"   ->   name == "World"
+//
+// It also avoids "unexpected SIGIL/FOR/SECONDS" showing up inside expressions.
+func normalizeExprTokens(tokens []Token) []Token {
+	if len(tokens) == 0 {
+		return tokens
+	}
+
+	out := make([]Token, 0, len(tokens))
+
+	for i := 0; i < len(tokens); i++ {
+		t := tokens[i]
+
+		// Legacy: "SIGIL <ident>" used as a value reference in IF/WHILE conditions.
+		// Lexer emits TOK_SIGIL for the keyword "SIGIL".
+		if t.Type == TOK_SIGIL && strings.EqualFold(t.Lexeme, "SIGIL") {
+			// If it's followed by an IDENT, drop the SIGIL keyword and keep the name.
+			if i+1 < len(tokens) && tokens[i+1].Type == TOK_IDENT {
+				out = append(out, tokens[i+1])
+				i++ // consumed the IDENT too
+				continue
+			}
+			// Otherwise keep it (expression parser may still handle it, but usually this is invalid)
+			out = append(out, t)
+			continue
+		}
+
+		// Legacy comparator keyword: EQUALS -> ==
+		if t.Type == TOK_IDENT && strings.EqualFold(t.Lexeme, "EQUALS") {
+			t.Type = TOK_EQ
+			t.Lexeme = "=="
+			out = append(out, t)
+			continue
+		}
+
+		// Some scripts use ENDIF/ENDWHILE forms as IDENT tokens; those should never
+		// be evaluated as expression operands.
+		if t.Type == TOK_FOR || t.Type == TOK_SECONDS {
+			// These should not exist in a normal expression; drop them if they leak in.
+			continue
+		}
+
+		out = append(out, t)
+	}
+
+	return out
+}
+
+func evalBoolExpr(prog *Program, tokens []Token, sigils sigilTable) (bool, error) {
+	if len(tokens) == 0 {
+		return false, nil
+	}
+
+	tokens = normalizeExprTokens(tokens)
+
+	idx := 0
+	v, err := parseOr(prog, tokens, &idx, sigils)
+	if err != nil {
+		return false, err
+	}
+
+	return v.asBool(), nil
+}
+
 // ----- Expression engine entry point -----
 //
 // evalStringExpr: given the tokens for an expression *and some trailing junk*,
@@ -295,6 +371,9 @@ sliced:
 	if len(tokens) == 0 {
 		return "", nil
 	}
+
+	// Normalize legacy tokens ("SIGIL name", "EQUALS") into expression tokens.
+	tokens = normalizeExprTokens(tokens)
 
 	i := 0
 	val, err := parseOr(prog, tokens, &i, sigils)
@@ -552,17 +631,66 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 		return exprValue{}, fmt.Errorf("unexpected end of expression")
 	}
 
+	// Local helper: interpret sigil string like your existing IDENT branch
+	coerce := func(val string) exprValue {
+		s := strings.TrimSpace(val)
+		if strings.EqualFold(s, "true") {
+			return makeBool(true)
+		}
+		if strings.EqualFold(s, "false") {
+			return makeBool(false)
+		}
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return makeFloat(f)
+		}
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return makeInt(n)
+		}
+		return makeText(val)
+	}
+
 	tok := tokens[*i]
 
+	// --- GLUE WORDS: skip them if they show up inside an expression ---
+	// These words are syntax filler in SIC (SLEEP FOR X SECONDS, RAISE ... BY X).
+	if tok.Type == TOK_FOR || tok.Type == TOK_SECONDS || tok.Type == TOK_SECONDS ||
+		(tok.Type == TOK_IDENT && (strings.EqualFold(tok.Lexeme, "BY") ||
+			strings.EqualFold(tok.Lexeme, "FOR") ||
+			strings.EqualFold(tok.Lexeme, "SECONDS"))) {
+		*i++
+		return parsePrimary(prog, tokens, i, sigils)
+	}
+
 	switch tok.Type {
-	// "foo"
+
 	case TOK_STRING:
 		*i++
 		return makeText(tok.Lexeme), nil
 
-	// $SIGIL or $TIME_NOW
+	case TOK_TIME_NOW:
+		*i++
+		return makeInt(time.Now().Unix()), nil
+
+	// Some lexers still emit TOK_SIGIL before IDENT for "SIGIL name"
 	case TOK_SIGIL:
-		// consume '$'
+		*i++
+		if *i >= len(tokens) || tokens[*i].Type != TOK_IDENT {
+			return exprValue{}, fmt.Errorf("expected SIGIL name after SIGIL at %s:%d:%d",
+				tok.File, tok.Line, tok.Column)
+		}
+		nameTok := tokens[*i]
+		name := nameTok.Lexeme
+		*i++
+
+		val, ok := sigils[name]
+		if !ok {
+			return exprValue{}, fmt.Errorf("unknown SIGIL %s at %s:%d:%d",
+				name, nameTok.File, nameTok.Line, nameTok.Column)
+		}
+		return coerce(val), nil
+
+	// $NAME
+	case TOK_DOLLAR:
 		*i++
 		if *i >= len(tokens) || tokens[*i].Type != TOK_IDENT {
 			return exprValue{}, fmt.Errorf("expected SIGIL name after $ at %s:%d:%d",
@@ -572,10 +700,8 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 		name := nameTok.Lexeme
 		*i++
 
-		// Built-in pseudo-sigil $TIME_NOW
 		if strings.EqualFold(name, "TIME_NOW") {
-			now := time.Now().Unix()
-			return makeText(fmt.Sprintf("%d", now)), nil
+			return makeInt(time.Now().Unix()), nil
 		}
 
 		val, ok := sigils[name]
@@ -583,47 +709,29 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 			return exprValue{}, fmt.Errorf("unknown SIGIL %s at %s:%d:%d",
 				name, nameTok.File, nameTok.Line, nameTok.Column)
 		}
+		return coerce(val), nil
 
-		// auto-interpret the sigil value like IDENT does
-		s := strings.TrimSpace(val)
-		if strings.EqualFold(s, "true") {
-			return makeBool(true), nil
-		}
-		if strings.EqualFold(s, "false") {
-			return makeBool(false), nil
-		}
-		if f, err := strconv.ParseFloat(s, 64); err == nil {
-			return makeFloat(f), nil
-		}
-		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
-			return makeInt(n), nil
-		}
-		return makeText(val), nil
-
-	// 123 or 3.14
 	case TOK_NUM:
 		*i++
 		lex := strings.TrimSpace(tok.Lexeme)
 		if strings.ContainsAny(lex, ".eE") {
 			f, err := strconv.ParseFloat(lex, 64)
 			if err != nil {
-				return exprValue{}, fmt.Errorf("invalid float literal %q", lex)
+				return exprValue{}, fmt.Errorf("invalid float literal %q", tok.Lexeme)
 			}
 			return makeFloat(f), nil
 		}
 		n, err := strconv.ParseInt(lex, 10, 64)
 		if err != nil {
-			return exprValue{}, fmt.Errorf("invalid int literal %q", lex)
+			return exprValue{}, fmt.Errorf("invalid int literal %q", tok.Lexeme)
 		}
 		return makeInt(n), nil
 
-	// IDENT: SIGIL lookup, except TIME_NOW
+	// Bare IDENT means: look up sigil value
 	case TOK_IDENT:
-		// Built-in bare TIME_NOW (no sigil needed)
 		if strings.EqualFold(tok.Lexeme, "TIME_NOW") {
 			*i++
-			now := time.Now().Unix()
-			return makeText(fmt.Sprintf("%d", now)), nil
+			return makeInt(time.Now().Unix()), nil
 		}
 
 		val, ok := sigils[tok.Lexeme]
@@ -632,23 +740,7 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 				tok.Lexeme, tok.File, tok.Line, tok.Column)
 		}
 		*i++
-		s := strings.TrimSpace(val)
-		if strings.EqualFold(s, "true") {
-			return makeBool(true), nil
-		}
-		if strings.EqualFold(s, "false") {
-			return makeBool(false), nil
-		}
-		if strings.ContainsAny(s, ".eE") {
-			if f, err := strconv.ParseFloat(s, 64); err == nil {
-				return makeFloat(f), nil
-			}
-		} else {
-			if n, err := strconv.ParseInt(s, 10, 64); err == nil {
-				return makeInt(n), nil
-			}
-		}
-		return makeText(val), nil
+		return coerce(val), nil
 
 	case TOK_LPAREN:
 		*i++
@@ -657,13 +749,13 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 			return exprValue{}, err
 		}
 		if *i >= len(tokens) || tokens[*i].Type != TOK_RPAREN {
-			return exprValue{}, fmt.Errorf("expected ')' in expression")
+			return exprValue{}, fmt.Errorf("expected ')' in expression at %s:%d:%d",
+				tok.File, tok.Line, tok.Column)
 		}
 		*i++
 		return inner, nil
 
 	case TOK_SUMMON:
-		// Allow SUMMON as an expression: delegate to existing summoning logic.
 		start := *i
 		val, consumed, err := evalSummonExpr(prog, tokens, start, sigils)
 		if err != nil {
@@ -848,6 +940,14 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 			i = next
 			continue
 
+		case TOK_SLEEP:
+			next, err := execSleep(prog, tokens, i, sigils)
+			if err != nil {
+				return "", err
+			}
+			i = next
+			continue
+
 		case TOK_IDENT:
 			switch tok.Lexeme {
 			case "SEND":
@@ -870,7 +970,17 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 				}
 				i = next
 				continue
+
+			case "SLEEP":
+				next, err := execSleep(prog, tokens, i, sigils)
+				if err != nil {
+					return "", err
+				}
+				i = next
+				continue
+
 			}
+
 			// other idents fall through
 
 		case TOK_IF:
@@ -940,6 +1050,65 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 	// Top-level or side-effect-only WORKs are allowed to finish
 	// without an explicit THUS/SEND BACK.
 	return "", nil
+}
+
+func execSleep(prog *Program, tokens []Token, i int, sigils sigilTable) (int, error) {
+	startTok := tokens[i] // TOK_SLEEP or TOK_IDENT("SLEEP")
+	i++                   // after SLEEP
+
+	// Optional FOR (either keyword token or IDENT)
+	if i < len(tokens) && (tokens[i].Type == TOK_FOR ||
+		(tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "FOR"))) {
+		i++
+	}
+
+	// Duration expression until SECONDS / DOT / NEWLINE / ENDWORK
+	exprStart := i
+	for i < len(tokens) &&
+		tokens[i].Type != TOK_DOT &&
+		tokens[i].Type != TOK_NEWLINE &&
+		tokens[i].Type != TOK_ENDWORK &&
+		tokens[i].Type != TOK_SECONDS &&
+		!(tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "SECONDS")) {
+		i++
+	}
+
+	if exprStart == i {
+		return i, fmt.Errorf("SLEEP: expected duration at %s:%d:%d",
+			startTok.File, startTok.Line, startTok.Column)
+	}
+
+	// Evaluate duration expression
+	exprTokens := normalizeExprTokens(tokens[exprStart:i])
+	idx := 0
+	v, err := parseOr(prog, exprTokens, &idx, sigils)
+	if err != nil {
+		return i, err
+	}
+
+	secs, ok := v.asFloat()
+	if !ok {
+		return i, fmt.Errorf("SLEEP: duration must be numeric at %s:%d:%d",
+			startTok.File, startTok.Line, startTok.Column)
+	}
+	if secs < 0 {
+		return i, fmt.Errorf("SLEEP: duration must be >= 0 at %s:%d:%d",
+			startTok.File, startTok.Line, startTok.Column)
+	}
+
+	// Optional SECONDS token or IDENT("SECONDS")
+	if i < len(tokens) && (tokens[i].Type == TOK_SECONDS ||
+		(tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "SECONDS"))) {
+		i++
+	}
+
+	// Optional DOT
+	if i < len(tokens) && tokens[i].Type == TOK_DOT {
+		i++
+	}
+
+	time.Sleep(time.Duration(secs * float64(time.Second)))
+	return i, nil
 }
 
 // ---------------- SAY ----------------
@@ -1021,44 +1190,94 @@ func execLog(prog *Program, tokens []Token, i int, sigils sigilTable) (int, erro
 	return i, nil
 }
 
-// ---------------- LET SIGIL ----------------
+// parseSigilTarget parses the "target sigil name" in a few ergonomic forms:
+//
+//	LET SIGIL NAME BE ...
+//	LET NAME BE ...
+//	LET $NAME BE ...        (if '$' is tokenized as TOK_SIGIL)
+//
+// It returns (name, newIndex, error).
+func parseSigilTarget(tokens []Token, i int) (string, int, error) {
+	if i >= len(tokens) {
+		return "", i, fmt.Errorf("expected SIGIL name")
+	}
 
-// LET [EPHEMERAL] SIGIL name BE <expr>.
+	// Optional keyword SIGIL:
+	// - lexer emits TOK_SIGIL for keyword "SIGIL"
+	// - tolerate IDENT "SIGIL" too, just in case
+	if tokens[i].Type == TOK_SIGIL ||
+		(tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "SIGIL")) {
+		i++
+		if i >= len(tokens) {
+			return "", i, fmt.Errorf("expected name after SIGIL")
+		}
+	}
+
+	// Optional '$' marker
+	if i < len(tokens) && tokens[i].Type == TOK_DOLLAR {
+		i++
+		if i >= len(tokens) {
+			return "", i, fmt.Errorf("expected name after $")
+		}
+	}
+
+	// Name must be IDENT (also allow "$NAME" glued into IDENT if you want)
+	if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
+		return "", i, fmt.Errorf("expected SIGIL name")
+	}
+
+	name := tokens[i].Lexeme
+	if strings.HasPrefix(name, "$") {
+		name = strings.TrimPrefix(name, "$")
+	}
+	if name == "" {
+		return "", i, fmt.Errorf("empty SIGIL name")
+	}
+
+	return name, i + 1, nil
+}
+
+// ---------------- LET SIGIL ----------------
+//
+// Accepts all of:
+//
+//	LET SIGIL name BE <expr>.
+//	LET name BE <expr>.
+//	LET $name BE <expr>.          (tolerated; treated same as name)
+//
+// Also supports:
+//
+//	LET EPHEMERAL SIGIL name BE <expr>.
+//	LET EPHEMERAL name BE <expr>.
 func execLet(prog *Program, tokens []Token, i int, sigils sigilTable, ephemeral map[string]bool) (int, error) {
-	// tokens[i] = TOK_LET
+	startTok := tokens[i] // TOK_LET
 	i++
 
-	// Optional EPHEMERAL
 	isEphemeral := false
 	if i < len(tokens) && tokens[i].Type == TOK_EPHEMERAL {
 		isEphemeral = true
 		i++
 	}
 
-	// Expect SIGIL
-	if i >= len(tokens) || tokens[i].Type != TOK_SIGIL {
-		return i, fmt.Errorf("LET: expected SIGIL after LET at %s:%d:%d",
-			tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
+	// Parse target name:
+	//   LET SIGIL X BE ...
+	//   LET X BE ...              (allowed)
+	//   LET $X BE ...             (tolerated)
+	name, next, err := parseSigilTarget(tokens, i)
+	if err != nil {
+		return i, fmt.Errorf("LET: %v at %s:%d:%d", err, startTok.File, startTok.Line, startTok.Column)
 	}
-	i++
+	i = next
 
-	// Expect IDENT (name)
-	if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
-		return i, fmt.Errorf("LET: expected SIGIL name after SIGIL at %s:%d:%d",
-			tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
-	}
-	name := tokens[i].Lexeme
-	i++
-
-	// Expect BE (either TOK_BE or IDENT "BE")
-	if i >= len(tokens) ||
-		!(tokens[i].Type == TOK_BE ||
-			(tokens[i].Type == TOK_IDENT && tokens[i].Lexeme == "BE")) {
+	// Expect BE (TOK_BE or IDENT "BE")
+	if i >= len(tokens) || !(tokens[i].Type == TOK_BE ||
+		(tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "BE"))) {
 		return i, fmt.Errorf("LET: expected BE after SIGIL %s at %s:%d:%d",
 			name, tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
 	}
-	i++ // after BE
+	i++
 
+	// Expression until DOT / NEWLINE / ENDWORK
 	exprStart := i
 	for i < len(tokens) &&
 		tokens[i].Type != TOK_DOT &&
@@ -1071,15 +1290,18 @@ func execLet(prog *Program, tokens []Token, i int, sigils sigilTable, ephemeral 
 	if err != nil {
 		return i, err
 	}
+
 	setSigil(sigils, name, val)
 
-	if isEphemeral {
+	if isEphemeral && ephemeral != nil {
 		ephemeral[name] = true
 	}
 
+	// Optional DOT
 	if i < len(tokens) && tokens[i].Type == TOK_DOT {
 		i++
 	}
+
 	return i, nil
 }
 
@@ -1088,28 +1310,22 @@ func execLet(prog *Program, tokens []Token, i int, sigils sigilTable, ephemeral 
 // Binds a sigil exactly like LET SIGIL, but the caller of this function
 // (execWork) is responsible for marking it as ephemeral for scrubbing.
 func execEphemeralSigil(prog *Program, tokens []Token, i int, sigils sigilTable) (int, string, error) {
-	startTok := tokens[i] // TOK_EPHEMERAL
-	i++                   // after EPHEMERAL
+	i++ // after EPHEMERAL
 
 	// Optional LET: "EPHEMERAL LET SIGIL ..." is tolerated.
 	if i < len(tokens) && tokens[i].Type == TOK_LET {
 		i++
 	}
 
-	// Expect SIGIL
-	if i >= len(tokens) || tokens[i].Type != TOK_SIGIL {
-		return i, "", fmt.Errorf("EPHEMERAL: expected SIGIL after EPHEMERAL at %s:%d:%d",
-			startTok.File, startTok.Line, startTok.Column)
+	// Parse sigil target name:
+	//   EPHEMERAL SIGIL X BE ...
+	//   EPHEMERAL X BE ...          (allowed)
+	//   EPHEMERAL $X BE ...         (if lexer supports)
+	name, next, err := parseSigilTarget(tokens, i)
+	if err != nil {
+		return i, "", fmt.Errorf("EPHEMERAL: %v", err)
 	}
-	i++
-
-	// Expect IDENT (name)
-	if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
-		return i, "", fmt.Errorf("EPHEMERAL: expected SIGIL name after SIGIL at %s:%d:%d",
-			tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
-	}
-	name := tokens[i].Lexeme
-	i++
+	i = next
 
 	// Expect BE (either TOK_BE or IDENT "BE")
 	if i >= len(tokens) ||
@@ -1378,75 +1594,28 @@ func execIf(prog *Program, tokens []Token, i int, sigils sigilTable) (int, error
 		i++
 	}
 
-	// Expect SIGIL
-	if i >= len(tokens) || tokens[i].Type != TOK_SIGIL {
-		return i, fmt.Errorf("IF: expected SIGIL after IF at %s:%d:%d",
+	// ---- Parse condition as tokens up to THEN / COLON ----
+	condStart := i
+	for i < len(tokens) &&
+		tokens[i].Type != TOK_COLON &&
+		!(tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "THEN")) {
+		i++
+	}
+	condTokens := tokens[condStart:i]
+	if len(condTokens) == 0 {
+		return i, fmt.Errorf("IF: expected condition after IF at %s:%d:%d",
 			startTok.File, startTok.Line, startTok.Column)
 	}
-	i++
 
-	// SIGIL name
-	if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
-		return i, fmt.Errorf("IF: expected SIGIL name after SIGIL at %s:%d:%d",
-			tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
-	}
-	sigName := tokens[i].Lexeme
-	i++
-
-	// comparator: either IDENT "EQUALS" or TOK_EQUAL
-	if i >= len(tokens) {
-		return i, fmt.Errorf("IF: missing comparator for SIGIL %s", sigName)
-	}
-	compTok := tokens[i]
-	if compTok.Type == TOK_IDENT && compTok.Lexeme != "EQUALS" {
-		return i, fmt.Errorf("IF: expected EQUALS after SIGIL %s at %s:%d:%d",
-			sigName, compTok.File, compTok.Line, compTok.Column)
-	}
-	if compTok.Type != TOK_IDENT && compTok.Type != TOK_EQUAL {
-		return i, fmt.Errorf("IF: expected comparator after SIGIL %s at %s:%d:%d",
-			sigName, compTok.File, compTok.Line, compTok.Column)
-	}
-	i++
-
-	// Right-hand side: STRING or SIGIL <name> or bare ident (sigil)
-	if i >= len(tokens) {
-		return i, fmt.Errorf("IF: missing right-hand side after comparator for SIGIL %s", sigName)
-	}
-
-	var rhs string
-	switch tokens[i].Type {
-	case TOK_STRING:
-		rhs = tokens[i].Lexeme
-		i++
-	case TOK_SIGIL:
-		i++
-		if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
-			return i, fmt.Errorf("IF: expected SIGIL name after SIGIL at %s:%d:%d",
-				tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
-		}
-		rhsName := tokens[i].Lexeme
-		rhs, _ = getSigil(sigils, rhsName)
-		i++
-	case TOK_IDENT:
-		// treat as sigil name
-		rhs, _ = getSigil(sigils, tokens[i].Lexeme)
-		i++
-	default:
-		return i, fmt.Errorf("IF: unsupported RHS token %s at %s:%d:%d",
-			tokens[i].Type, tokens[i].File, tokens[i].Line, tokens[i].Column)
-	}
-
-	// Optional IDENT "THEN"
-	if i < len(tokens) &&
-		tokens[i].Type == TOK_IDENT &&
-		tokens[i].Lexeme == "THEN" {
+	// Optional THEN
+	if i < len(tokens) && tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "THEN") {
 		i++
 	}
 
 	// Expect COLON
 	if i >= len(tokens) || tokens[i].Type != TOK_COLON {
 		return i, fmt.Errorf("IF: expected COLON after condition at %s:%d:%d",
-			tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
+			startTok.File, startTok.Line, startTok.Column)
 	}
 	i++ // after COLON
 
@@ -1455,37 +1624,63 @@ func execIf(prog *Program, tokens []Token, i int, sigils sigilTable) (int, error
 		i++
 	}
 
-	// Find ELSE / END boundaries
 	thenStart := i
 	elseStart := -1
 	endPos := -1
-	depth := 1 // nested IFs future-proof
 
+	// We consider both:
+	//   END.      (TOK_END + optional DOT)
+	//   ENDIF.    (IDENT "ENDIF" + optional DOT)
+	depth := 1
 	for j := i; j < len(tokens); j++ {
 		t := tokens[j]
+
+		// Nested IF
 		if t.Type == TOK_IF {
 			depth++
-		} else if t.Type == TOK_ELSE && depth == 1 {
+			continue
+		}
+
+		// ELSE only at current depth
+		if t.Type == TOK_ELSE && depth == 1 {
 			elseStart = j
-		} else if t.Type == TOK_END && depth == 1 {
-			endPos = j
-			break
-		} else if t.Type == TOK_END && depth > 1 {
+			continue
+		}
+
+		// END closes an IF if depth==1, otherwise reduces nesting.
+		if t.Type == TOK_END {
+			if depth == 1 {
+				endPos = j
+				break
+			}
 			depth--
+			continue
+		}
+
+		// ENDIF (often lexed as IDENT)
+		if t.Type == TOK_IDENT && strings.EqualFold(t.Lexeme, "ENDIF") {
+			if depth == 1 {
+				endPos = j
+				break
+			}
+			depth--
+			continue
 		}
 	}
 
 	if endPos == -1 {
-		return i, fmt.Errorf("IF: unmatched END for IF at %s:%d:%d",
+		// Match your existing wording style
+		return i, fmt.Errorf("IF: unmatched ENDIF for IF at %s:%d:%d",
 			startTok.File, startTok.Line, startTok.Column)
 	}
 
-	// Evaluate condition (simple equality)
-	lhs, _ := getSigil(sigils, sigName)
-	cond := (lhs == rhs)
+	// Evaluate condition (boolean expression)
+	cond, err := evalBoolExpr(prog, condTokens, sigils)
+	if err != nil {
+		return i, err
+	}
 
 	if cond {
-		// Execute THEN block
 		thenEnd := endPos
 		if elseStart != -1 {
 			thenEnd = elseStart
@@ -1494,8 +1689,8 @@ func execIf(prog *Program, tokens []Token, i int, sigils sigilTable) (int, error
 			return endPos + 1, err
 		}
 	} else if elseStart != -1 {
-		// Execute ELSE block
 		k := elseStart + 1
+
 		// Optional COLON
 		if k < endPos && tokens[k].Type == TOK_COLON {
 			k++
@@ -1509,8 +1704,12 @@ func execIf(prog *Program, tokens []Token, i int, sigils sigilTable) (int, error
 		}
 	}
 
-	// Resume AFTER END.
-	return endPos + 1, nil
+	// Resume after END/ENDIF and optional DOT
+	k := endPos + 1
+	if k < len(tokens) && tokens[k].Type == TOK_DOT {
+		k++
+	}
+	return k, nil
 }
 
 // OMEN-based IF:
@@ -1688,47 +1887,16 @@ func execWhile(prog *Program, tokens []Token, i int, sigils sigilTable) (int, er
 		i++
 	}
 
-	// Expect SIGIL
-	if i >= len(tokens) || tokens[i].Type != TOK_SIGIL {
-		return i, fmt.Errorf("WHILE: expected SIGIL after WHILE at %s:%d:%d",
-			startTok.File, startTok.Line, startTok.Column)
-	}
-	i++
-
-	// SIGIL name
-	if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
-		return i, fmt.Errorf("WHILE: expected SIGIL name after SIGIL at %s:%d:%d",
-			tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
-	}
-	sigName := tokens[i].Lexeme
-	i++
-
-	// comparator: IDENT "EQUALS" or '='
-	if i >= len(tokens) {
-		return i, fmt.Errorf("WHILE: missing comparator for SIGIL %s", sigName)
-	}
-	compTok := tokens[i]
-	if compTok.Type == TOK_IDENT && compTok.Lexeme != "EQUALS" {
-		return i, fmt.Errorf("WHILE: expected EQUALS after SIGIL %s at %s:%d:%d",
-			sigName, compTok.File, compTok.Line, compTok.Column)
-	}
-	if compTok.Type != TOK_IDENT && compTok.Type != TOK_EQUAL {
-		return i, fmt.Errorf("WHILE: expected comparator after SIGIL %s at %s:%d:%d",
-			sigName, compTok.File, compTok.Line, compTok.Column)
-	}
-	i++
-
-	// Right–hand side: everything up to COLON is our condition expression.
-	condExprStart := i
+	// Condition tokens until COLON
+	condStart := i
 	for i < len(tokens) && tokens[i].Type != TOK_COLON {
 		i++
 	}
 	if i >= len(tokens) || tokens[i].Type != TOK_COLON {
 		return i, fmt.Errorf("WHILE: expected COLON after condition at %s:%d:%d",
-			tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
+			startTok.File, startTok.Line, startTok.Column)
 	}
-	condExprEnd := i
-	condTokens := tokens[condExprStart:condExprEnd]
+	condTokens := tokens[condStart:i]
 	i++ // after COLON
 
 	// Skip NEWLINEs before body
@@ -1736,65 +1904,54 @@ func execWhile(prog *Program, tokens []Token, i int, sigils sigilTable) (int, er
 		i++
 	}
 
-	// Find matching ENDWHILE, respecting nesting.
+	// Find matching ENDWHILE (token or IDENT)
 	bodyStart := i
 	endPos := -1
 	depth := 1
-
 	for j := i; j < len(tokens); j++ {
 		t := tokens[j]
 
-		// Nested WHILE → increase depth
 		if t.Type == TOK_WHILE {
 			depth++
 			continue
 		}
-
-		// ENDWHILE can be a dedicated token or just IDENT "ENDWHILE"
-		if t.Type == TOK_ENDWHILE ||
-			(t.Type == TOK_IDENT && t.Lexeme == "ENDWHILE") {
+		if t.Type == TOK_ENDWHILE || (t.Type == TOK_IDENT && strings.EqualFold(t.Lexeme, "ENDWHILE")) {
 			depth--
 			if depth == 0 {
 				endPos = j
 				break
 			}
-			continue
 		}
 	}
-
 	if endPos == -1 {
 		return i, fmt.Errorf("WHILE: unmatched ENDWHILE for WHILE at %s:%d:%d",
 			startTok.File, startTok.Line, startTok.Column)
 	}
 
-	// Main loop with a safety cap
+	// Safety cap
 	const maxWhileIterations = 100000
 	iterations := 0
 
 	for {
 		if iterations >= maxWhileIterations {
-			return endPos + 1, fmt.Errorf("WHILE: exceeded %d iterations; possible infinite loop", maxWhileIterations)
+			return endPos + 1, fmt.Errorf("WHILE: exceeded %d iterations", maxWhileIterations)
 		}
 		iterations++
 
-		// Evaluate condition: SIGIL value == RHS expression
-		lhs, _ := getSigil(sigils, sigName)
-		rhs, err := evalStringExpr(prog, condTokens, sigils)
+		ok, err := evalBoolExpr(prog, condTokens, sigils)
 		if err != nil {
 			return endPos + 1, err
 		}
-
-		if lhs != rhs {
+		if !ok {
 			break
 		}
 
-		// Run body as a mini-Work
 		if err := execBlock(prog, tokens[bodyStart:endPos], sigils); err != nil {
 			return endPos + 1, err
 		}
 	}
 
-	// Resume just after ENDWHILE (and optional trailing '.')
+	// Resume just after ENDWHILE (and optional '.')
 	k := endPos + 1
 	if k < len(tokens) && tokens[k].Type == TOK_DOT {
 		k++
@@ -2303,53 +2460,82 @@ func readArcOperand(tokens []Token, i int, sigils sigilTable) (int64, int, error
 }
 
 func execArcRaise(tokens []Token, i int, sigils sigilTable) (int, error) {
-	startTok := tokens[i]
-	i++ // after RAISE
+	startTok := tokens[i] // TOK_RAISE
+	i++                   // after RAISE
 
-	// Expect SIGIL
-	if i >= len(tokens) || tokens[i].Type != TOK_SIGIL {
-		return i, fmt.Errorf("ARCWORK RAISE: expected SIGIL after RAISE at %s:%d:%d",
+	// Skip NEWLINEs
+	for i < len(tokens) && tokens[i].Type == TOK_NEWLINE {
+		i++
+	}
+
+	if i >= len(tokens) {
+		return i, fmt.Errorf("RAISE: expected target after RAISE at %s:%d:%d",
 			startTok.File, startTok.Line, startTok.Column)
 	}
-	i++
 
-	// SIGIL name
+	// Optional leading '$' before name (tolerated)
+	if i < len(tokens) && (tokens[i].Type == TOK_DOLLAR || tokens[i].Type == TOK_SIGIL) {
+		i++
+	}
+
+	// Name must be IDENT
 	if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
-		return i, fmt.Errorf("ARCWORK RAISE: expected SIGIL name after SIGIL at %s:%d:%d",
+		return i, fmt.Errorf("RAISE: expected SIGIL name after RAISE at %s:%d:%d",
 			tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
 	}
 	name := tokens[i].Lexeme
 	i++
 
-	// BY
-	if i >= len(tokens) || tokens[i].Type != TOK_IDENT || tokens[i].Lexeme != "BY" {
-		return i, fmt.Errorf("ARCWORK RAISE: expected BY after SIGIL %s at %s:%d:%d",
-			name, tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
-	}
-	i++
-
-	delta, next, err := readArcOperand(tokens, i, sigils)
-	if err != nil {
-		return next, err
-	}
-	i = next
-
-	cur, err := getSigilInt(sigils, name)
-	if err != nil {
-		return i, err
-	}
-	setSigilInt(sigils, name, cur+delta)
-
-	// consume until DOT / NEWLINE / ENDWORK
+	// Amount expression until DOT/NEWLINE/ENDARCWORK
+	exprStart := i
 	for i < len(tokens) &&
 		tokens[i].Type != TOK_DOT &&
 		tokens[i].Type != TOK_NEWLINE &&
-		tokens[i].Type != TOK_ENDWORK {
+		!(tokens[i].Type == TOK_IDENT && lexemeIs(tokens[i], "ENDARCWORK")) {
 		i++
 	}
+	if exprStart == i {
+		return i, fmt.Errorf("RAISE: expected amount after SIGIL %s at %s:%d:%d",
+			name, startTok.File, startTok.Line, startTok.Column)
+	}
+
+	// Evaluate amount using existing expression parser (normalized)
+	amtTokens := normalizeExprTokens(tokens[exprStart:i])
+	idx := 0
+	amtVal, err := parseOr(nil, amtTokens, &idx, sigils)
+	if err != nil {
+		return i, err
+	}
+
+	amt, ok := amtVal.asFloat()
+	if !ok {
+		return i, fmt.Errorf("RAISE: amount must be numeric for SIGIL %s at %s:%d:%d",
+			name, startTok.File, startTok.Line, startTok.Column)
+	}
+
+	// Get current value (default 0)
+	curStr, _ := getSigil(sigils, name)
+	cur := 0.0
+	if strings.TrimSpace(curStr) != "" {
+		if f, perr := strconv.ParseFloat(strings.TrimSpace(curStr), 64); perr == nil {
+			cur = f
+		}
+	}
+
+	newVal := cur + amt
+
+	// Preserve integer-ness when possible
+	if float64(int64(newVal)) == newVal {
+		setSigil(sigils, name, fmt.Sprintf("%d", int64(newVal)))
+	} else {
+		setSigil(sigils, name, fmt.Sprintf("%g", newVal))
+	}
+
+	// Optional DOT
 	if i < len(tokens) && tokens[i].Type == TOK_DOT {
 		i++
 	}
+
 	return i, nil
 }
 
