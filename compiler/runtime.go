@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,9 @@ type altarServer struct {
 	addr    string
 	mux     *http.ServeMux
 	started bool
+
+	// routeKey = method + " " + path
+	registered map[string]bool
 }
 
 var (
@@ -58,6 +62,115 @@ func getSigilInt(sigils sigilTable, name string) (int64, error) {
 
 func setSigilInt(sigils sigilTable, name string, v int64) {
 	sigils[name] = strconv.FormatInt(v, 10)
+}
+
+const sicInvisibleMetaPrefix = "__SIC_META_INVISIBLE__"
+
+// isInvisibleSigil reports whether `name` is marked invisible in this environment.
+func isInvisibleSigil(sigils sigilTable, name string) bool {
+	if sigils == nil || name == "" {
+		return false
+	}
+	_, ok := sigils[sicInvisibleMetaPrefix+name]
+	return ok
+}
+
+// markInvisibleSigil marks `name` as invisible in this environment.
+func markInvisibleSigil(sigils sigilTable, name string) {
+	if sigils == nil || name == "" {
+		return
+	}
+	sigils[sicInvisibleMetaPrefix+name] = "1"
+}
+
+// unmarkInvisibleSigil removes invisibility from `name` (optional, but handy).
+func unmarkInvisibleSigil(sigils sigilTable, name string) {
+	if sigils == nil || name == "" {
+		return
+	}
+	delete(sigils, sicInvisibleMetaPrefix+name)
+}
+
+// setSigilInvisible sets a sigil value and marks it invisible.
+func setSigilInvisible(sigils sigilTable, name, v string) {
+	setSigil(sigils, name, v)
+	markInvisibleSigil(sigils, name)
+}
+
+// cloneVisibleSigils copies only visible sigils from src->dst.
+// It also skips all internal meta keys.
+func cloneVisibleSigils(dst, src sigilTable) {
+	for k, v := range src {
+		// skip meta keys entirely
+		if strings.HasPrefix(k, sicInvisibleMetaPrefix) {
+			continue
+		}
+		// skip invisibles by default
+		if isInvisibleSigil(src, k) {
+			continue
+		}
+		dst[k] = v
+	}
+}
+
+const sicRedacted = "[REDACTED]"
+
+func redactIfTainted(val string, tainted bool) string {
+	if tainted {
+		return sicRedacted
+	}
+	return val
+}
+
+// exprSingleSigilRef returns (sigilName, true) if exprTokens represent
+// a *direct* sigil reference with no operators.
+//
+// Supported forms:
+//   - SIGIL <name>         (TOK_SIGIL or TOK_SIGIL + TOK_IDENT)
+//   - $<name>              (TOK_DOLLAR + TOK_IDENT)
+//   - <name>               (TOK_IDENT)  // your parsePrimary treats ident as sigil lookup
+func exprSingleSigilRef(exprTokens []Token) (string, bool) {
+	if len(exprTokens) == 0 {
+		return "", false
+	}
+
+	// Trim surrounding NEWLINEs (shouldn't be present, but be defensive)
+	start := 0
+	for start < len(exprTokens) && exprTokens[start].Type == TOK_NEWLINE {
+		start++
+	}
+	end := len(exprTokens)
+	for end > start && exprTokens[end-1].Type == TOK_NEWLINE {
+		end--
+	}
+	toks := exprTokens[start:end]
+	if len(toks) == 0 {
+		return "", false
+	}
+
+	// SIGIL <ident>
+	if len(toks) == 2 && (toks[0].Type == TOK_SIGIL || toks[0].Type == TOK_SIGIL) && toks[1].Type == TOK_IDENT {
+		return toks[1].Lexeme, true
+	}
+
+	// $ <ident>
+	if len(toks) == 2 && toks[0].Type == TOK_DOLLAR && toks[1].Type == TOK_IDENT {
+		return toks[1].Lexeme, true
+	}
+
+	// bare IDENT (your runtime interprets as sigil lookup)
+	if len(toks) == 1 && toks[0].Type == TOK_IDENT {
+		return toks[0].Lexeme, true
+	}
+
+	return "", false
+}
+
+func redactIfInvisible(sigils sigilTable, name, val string) string {
+	if name != "" && isInvisibleSigil(sigils, name) {
+		return sicRedacted
+	}
+	return val
 }
 
 // omenError is raised by RAISE OMEN and caught by OMEN ... FALLS_TO_RUIN.
@@ -191,11 +304,12 @@ const (
 )
 
 type exprValue struct {
-	kind exprKind
-	s    string
-	i    int64
-	f    float64
-	b    bool
+	kind    exprKind
+	s       string
+	i       int64
+	f       float64
+	b       bool
+	tainted bool // true if this value depends on an INVISIBLE sigil
 }
 
 func (v exprValue) String() string {
@@ -220,6 +334,18 @@ func makeText(s string) exprValue   { return exprValue{kind: exprText, s: s} }
 func makeInt(i int64) exprValue     { return exprValue{kind: exprInt, i: i} }
 func makeFloat(f float64) exprValue { return exprValue{kind: exprFloat, f: f} }
 func makeBool(b bool) exprValue     { return exprValue{kind: exprBool, b: b} }
+
+// Utility: copy taint onto a produced value
+func withTaint(v exprValue, t bool) exprValue {
+	v.tainted = t
+	return v
+}
+
+// Utility: combine taint from two operands onto an output
+func combineTaint(out, a, b exprValue) exprValue {
+	out.tainted = a.tainted || b.tainted
+	return out
+}
 
 // Try to treat value as float (int promotes to float, text parsed if possible).
 func (v exprValue) asFloat() (float64, bool) {
@@ -383,6 +509,36 @@ sliced:
 	return val.String(), nil
 }
 
+func evalStringExprTainted(prog *Program, tokens []Token, sigils sigilTable) (string, bool, error) {
+	if len(tokens) == 0 {
+		return "", false, nil
+	}
+
+	end := len(tokens)
+	for idx, tok := range tokens {
+		switch tok.Type {
+		case TOK_DOT, TOK_COLON, TOK_NEWLINE, TOK_ENDWEAVE, TOK_ENDWORK, TOK_FROM:
+			end = idx
+			goto sliced
+		}
+	}
+sliced:
+	tokens = tokens[:end]
+	if len(tokens) == 0 {
+		return "", false, nil
+	}
+
+	tokens = normalizeExprTokens(tokens)
+
+	i := 0
+	val, err := parseOr(prog, tokens, &i, sigils)
+	if err != nil {
+		return "", false, err
+	}
+
+	return val.String(), val.tainted, nil
+}
+
 // Precedence:
 //
 // OR
@@ -405,7 +561,7 @@ func parseOr(prog *Program, tokens []Token, i *int, sigils sigilTable) (exprValu
 		if err != nil {
 			return exprValue{}, err
 		}
-		left = makeBool(left.asBool() || right.asBool())
+		left = combineTaint(makeBool(left.asBool() || right.asBool()), left, right)
 	}
 	return left, nil
 }
@@ -421,7 +577,7 @@ func parseAnd(prog *Program, tokens []Token, i *int, sigils sigilTable) (exprVal
 		if err != nil {
 			return exprValue{}, err
 		}
-		left = makeBool(left.asBool() && right.asBool())
+		left = combineTaint(makeBool(left.asBool() && right.asBool()), left, right)
 	}
 	return left, nil
 }
@@ -431,9 +587,7 @@ func parseEquality(prog *Program, tokens []Token, i *int, sigils sigilTable) (ex
 	if err != nil {
 		return exprValue{}, err
 	}
-	for *i < len(tokens) &&
-		(tokens[*i].Type == TOK_EQ || tokens[*i].Type == TOK_NEQ) {
-
+	for *i < len(tokens) && (tokens[*i].Type == TOK_EQ || tokens[*i].Type == TOK_NEQ) {
 		op := tokens[*i].Type
 		*i++
 		right, err := parseComparison(prog, tokens, i, sigils)
@@ -442,7 +596,6 @@ func parseEquality(prog *Program, tokens []Token, i *int, sigils sigilTable) (ex
 		}
 
 		var eq bool
-
 		if lf, okL := left.asFloat(); okL {
 			if rf, okR := right.asFloat(); okR {
 				eq = lf == rf
@@ -453,11 +606,13 @@ func parseEquality(prog *Program, tokens []Token, i *int, sigils sigilTable) (ex
 			eq = left.String() == right.String()
 		}
 
+		var out exprValue
 		if op == TOK_EQ {
-			left = makeBool(eq)
+			out = makeBool(eq)
 		} else {
-			left = makeBool(!eq)
+			out = makeBool(!eq)
 		}
+		left = combineTaint(out, left, right)
 	}
 	return left, nil
 }
@@ -510,7 +665,7 @@ func parseComparison(prog *Program, tokens []Token, i *int, sigils sigilTable) (
 			}
 		}
 
-		left = makeBool(res)
+		left = combineTaint(makeBool(res), left, right)
 	}
 	return left, nil
 }
@@ -520,9 +675,7 @@ func parseTerm(prog *Program, tokens []Token, i *int, sigils sigilTable) (exprVa
 	if err != nil {
 		return exprValue{}, err
 	}
-	for *i < len(tokens) &&
-		(tokens[*i].Type == TOK_PLUS || tokens[*i].Type == TOK_MINUS) {
-
+	for *i < len(tokens) && (tokens[*i].Type == TOK_PLUS || tokens[*i].Type == TOK_MINUS) {
 		op := tokens[*i].Type
 		*i++
 		right, err := parseFactor(prog, tokens, i, sigils)
@@ -534,15 +687,18 @@ func parseTerm(prog *Program, tokens []Token, i *int, sigils sigilTable) (exprVa
 		rf, okR := right.asFloat()
 
 		if okL && okR {
+			var out exprValue
 			switch op {
 			case TOK_PLUS:
-				left = makeFloat(lf + rf)
+				out = makeFloat(lf + rf)
 			case TOK_MINUS:
-				left = makeFloat(lf - rf)
+				out = makeFloat(lf - rf)
 			}
+			left = combineTaint(out, left, right)
 		} else {
 			if op == TOK_PLUS {
-				left = makeText(left.String() + right.String())
+				out := makeText(left.String() + right.String())
+				left = combineTaint(out, left, right)
 			} else {
 				return exprValue{}, fmt.Errorf("cannot apply '-' to non-numeric values")
 			}
@@ -571,25 +727,28 @@ func parseFactor(prog *Program, tokens []Token, i *int, sigils sigilTable) (expr
 		lf, okL := left.asFloat()
 		rf, okR := right.asFloat()
 		if !okL || !okR {
-			return exprValue{}, fmt.Errorf("non-numeric value in arithmetic")
+			return exprValue{}, fmt.Errorf("non-numeric value in arithmetic expression")
 		}
 
+		var out exprValue
 		switch op {
 		case TOK_STAR:
-			left = makeFloat(lf * rf)
+			out = makeFloat(lf * rf)
 		case TOK_SLASH:
 			if rf == 0 {
 				return exprValue{}, fmt.Errorf("division by zero")
 			}
-			left = makeFloat(lf / rf)
+			out = makeFloat(lf / rf)
 		case TOK_PERCENT:
 			li := int64(lf)
 			ri := int64(rf)
 			if ri == 0 {
 				return exprValue{}, fmt.Errorf("modulo by zero")
 			}
-			left = makeInt(li % ri)
+			out = makeInt(li % ri)
 		}
+
+		left = combineTaint(out, left, right)
 	}
 	return left, nil
 }
@@ -611,7 +770,7 @@ func parseUnary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exprV
 		if !ok {
 			return exprValue{}, fmt.Errorf("cannot negate non-numeric value")
 		}
-		return makeFloat(-lf), nil
+		return withTaint(makeFloat(-lf), val.tainted), nil
 	}
 
 	if tok.Type == TOK_NOT {
@@ -620,7 +779,7 @@ func parseUnary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exprV
 		if err != nil {
 			return exprValue{}, err
 		}
-		return makeBool(!val.asBool()), nil
+		return withTaint(makeBool(!val.asBool()), val.tainted), nil
 	}
 
 	return parsePrimary(prog, tokens, i, sigils)
@@ -631,7 +790,6 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 		return exprValue{}, fmt.Errorf("unexpected end of expression")
 	}
 
-	// Local helper: interpret sigil string like your existing IDENT branch
 	coerce := func(val string) exprValue {
 		s := strings.TrimSpace(val)
 		if strings.EqualFold(s, "true") {
@@ -651,8 +809,7 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 
 	tok := tokens[*i]
 
-	// --- GLUE WORDS: skip them if they show up inside an expression ---
-	// These words are syntax filler in SIC (SLEEP FOR X SECONDS, RAISE ... BY X).
+	// Skip glue words inside expressions
 	if tok.Type == TOK_FOR || tok.Type == TOK_SECONDS || tok.Type == TOK_SECONDS ||
 		(tok.Type == TOK_IDENT && (strings.EqualFold(tok.Lexeme, "BY") ||
 			strings.EqualFold(tok.Lexeme, "FOR") ||
@@ -671,7 +828,7 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 		*i++
 		return makeInt(time.Now().Unix()), nil
 
-	// Some lexers still emit TOK_SIGIL before IDENT for "SIGIL name"
+	// "SIGIL name" legacy form
 	case TOK_SIGIL:
 		*i++
 		if *i >= len(tokens) || tokens[*i].Type != TOK_IDENT {
@@ -687,7 +844,12 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 			return exprValue{}, fmt.Errorf("unknown SIGIL %s at %s:%d:%d",
 				name, nameTok.File, nameTok.Line, nameTok.Column)
 		}
-		return coerce(val), nil
+
+		v := coerce(val)
+		if isInvisibleSigil(sigils, name) {
+			v = withTaint(v, true)
+		}
+		return v, nil
 
 	// $NAME
 	case TOK_DOLLAR:
@@ -709,7 +871,12 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 			return exprValue{}, fmt.Errorf("unknown SIGIL %s at %s:%d:%d",
 				name, nameTok.File, nameTok.Line, nameTok.Column)
 		}
-		return coerce(val), nil
+
+		v := coerce(val)
+		if isInvisibleSigil(sigils, name) {
+			v = withTaint(v, true)
+		}
+		return v, nil
 
 	case TOK_NUM:
 		*i++
@@ -727,7 +894,7 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 		}
 		return makeInt(n), nil
 
-	// Bare IDENT means: look up sigil value
+	// Bare IDENT => sigil lookup
 	case TOK_IDENT:
 		if strings.EqualFold(tok.Lexeme, "TIME_NOW") {
 			*i++
@@ -740,7 +907,12 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 				tok.Lexeme, tok.File, tok.Line, tok.Column)
 		}
 		*i++
-		return coerce(val), nil
+
+		v := coerce(val)
+		if isInvisibleSigil(sigils, tok.Lexeme) {
+			v = withTaint(v, true)
+		}
+		return v, nil
 
 	case TOK_LPAREN:
 		*i++
@@ -762,6 +934,8 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 			return exprValue{}, err
 		}
 		*i = start + consumed
+		// SUMMON result is treated as text. (If you later want taint to flow
+		// through SUMMON, you’ll need work-level tainting semantics.)
 		return makeText(val), nil
 	}
 
@@ -806,14 +980,13 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 	defer func() {
 		for name := range ephemeral {
 			delete(sigils, name)
+			// Also scrub invisibility metadata if present
+			delete(sigils, sicInvisibleMetaPrefix+name)
 		}
 	}()
 
 	for i < len(tokens) {
 		tok := tokens[i]
-
-		// Optional trace (you can uncomment while debugging)
-		// fmt.Printf("[TRACE] token=%s (%s)\n", tok.Type, tok.Lexeme)
 
 		// Skip NEWLINEs
 		if tok.Type == TOK_NEWLINE {
@@ -864,7 +1037,7 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 				if err != nil {
 					return "", err
 				}
-				// Mark this sigil as ephemeral for scrubbing at Work exit.
+				// Mark this sigil as ephemeral for scrubbing at WORK exit.
 				ephemeral[name] = true
 				i = next
 				continue
@@ -882,7 +1055,6 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 			// RAISE OMEN "name".
 			next, err := execRaiseOmen(tokens, i, sigils)
 			if err != nil {
-				// omenError (or other) propagates up; OMEN blocks can catch it.
 				return "", err
 			}
 			i = next
@@ -978,13 +1150,12 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 				}
 				i = next
 				continue
-
 			}
 
 			// other idents fall through
 
 		case TOK_IF:
-			// IF OMEN ... IS PRESENT THEN:   (OMEN-aware IF)
+			// IF OMEN ... IS PRESENT THEN: (OMEN-aware IF)
 			if i+1 < len(tokens) && tokens[i+1].Type == TOK_OMEN {
 				next, err := execIfOmen(prog, tokens, i, sigils)
 				if err != nil {
@@ -994,7 +1165,7 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 				continue
 			}
 
-			// Normal IF SIGIL ... EQUALS ...
+			// Normal IF ...
 			next, err := execIf(prog, tokens, i, sigils)
 			if err != nil {
 				return "", err
@@ -1003,7 +1174,6 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 			continue
 
 		case TOK_CHAMBER:
-			// CHAMBER ... ENDCHAMBER.
 			next, err := execChamberBlock(prog, tokens, i, sigils)
 			if err != nil {
 				return "", err
@@ -1028,7 +1198,6 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 			continue
 
 		case TOK_ARCWORK:
-			// ARCWORK: ... ENDARCWORK.
 			next, err := execArcworkBlock(prog, tokens, i, sigils)
 			if err != nil {
 				return "", err
@@ -1115,17 +1284,14 @@ func execSleep(prog *Program, tokens []Token, i int, sigils sigilTable) (int, er
 
 // SAY: <expr>.
 func execSay(prog *Program, tokens []Token, i int, sigils sigilTable) (int, error) {
-	// tokens[i] is TOK_SAY
-	i++ // move past SAY
+	i++ // after SAY
 
-	// Expect COLON
 	if i >= len(tokens) || tokens[i].Type != TOK_COLON {
 		return i, fmt.Errorf("SAY: expected COLON after SAY at %s:%d:%d",
 			tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
 	}
-	i++ // after COLON
+	i++
 
-	// Collect expression until we hit a '.' (TOK_DOT) or NEWLINE/ENDWORK
 	exprStart := i
 	for i < len(tokens) &&
 		tokens[i].Type != TOK_DOT &&
@@ -1133,19 +1299,18 @@ func execSay(prog *Program, tokens []Token, i int, sigils sigilTable) (int, erro
 		tokens[i].Type != TOK_ENDWORK {
 		i++
 	}
+	exprEnd := i
 
-	msg, err := evalStringExpr(prog, tokens[exprStart:i], sigils)
+	msg, tainted, err := evalStringExprTainted(prog, tokens[exprStart:exprEnd], sigils)
 	if err != nil {
 		return i, err
 	}
 
-	fmt.Println("[SIC SAY]", msg)
+	fmt.Println("[SIC SAY]", redactIfTainted(msg, tainted))
 
-	// Skip the dot if present
 	if i < len(tokens) && tokens[i].Type == TOK_DOT {
 		i++
 	}
-
 	return i, nil
 }
 
@@ -1253,19 +1418,33 @@ func execLet(prog *Program, tokens []Token, i int, sigils sigilTable, ephemeral 
 	startTok := tokens[i] // TOK_LET
 	i++
 
+	// Optional EPHEMERAL
 	isEphemeral := false
 	if i < len(tokens) && tokens[i].Type == TOK_EPHEMERAL {
 		isEphemeral = true
 		i++
 	}
 
+	// Optional INVISIBLE (either dedicated token if you add one later,
+	// or IDENT "INVISIBLE" for now)
+	isInvisible := false
+	if i < len(tokens) {
+		if tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "INVISIBLE") {
+			isInvisible = true
+			i++
+		}
+		// If you later add TOK_INVISIBLE, you can also accept it here:
+		// if tokens[i].Type == TOK_INVISIBLE { isInvisible = true; i++ }
+	}
+
 	// Parse target name:
-	//   LET SIGIL X BE ...
-	//   LET X BE ...              (allowed)
-	//   LET $X BE ...             (tolerated)
+	//   LET [EPHEMERAL] [INVISIBLE] SIGIL X BE ...
+	//   LET [EPHEMERAL] [INVISIBLE] X BE ...              (allowed)
+	//   LET [EPHEMERAL] [INVISIBLE] $X BE ...             (tolerated)
 	name, next, err := parseSigilTarget(tokens, i)
 	if err != nil {
-		return i, fmt.Errorf("LET: %v at %s:%d:%d", err, startTok.File, startTok.Line, startTok.Column)
+		return i, fmt.Errorf("LET: %v at %s:%d:%d",
+			err, startTok.File, startTok.Line, startTok.Column)
 	}
 	i = next
 
@@ -1275,7 +1454,7 @@ func execLet(prog *Program, tokens []Token, i int, sigils sigilTable, ephemeral 
 		return i, fmt.Errorf("LET: expected BE after SIGIL %s at %s:%d:%d",
 			name, tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
 	}
-	i++
+	i++ // after BE
 
 	// Expression until DOT / NEWLINE / ENDWORK
 	exprStart := i
@@ -1291,13 +1470,27 @@ func execLet(prog *Program, tokens []Token, i int, sigils sigilTable, ephemeral 
 		return i, err
 	}
 
-	setSigil(sigils, name, val)
-
-	if isEphemeral && ephemeral != nil {
-		ephemeral[name] = true
+	// Assign sigil with visibility semantics
+	if isInvisible {
+		setSigilInvisible(sigils, name, val) // sets value + marks invisible
+	} else {
+		setSigil(sigils, name, val)
+		// Optional: if overwriting a previously invisible sigil, you might
+		// choose to keep it invisible or clear invisibility. Current choice:
+		// leave invisibility as-is unless explicitly set invisible.
+		// If you want overwrite to become visible, uncomment:
+		// unmarkInvisibleSigil(sigils, name)
 	}
 
-	// Optional DOT
+	// Mark EPHEMERAL cleanup
+	if isEphemeral && ephemeral != nil {
+		ephemeral[name] = true
+		// Also scrub invisibility meta for that sigil on cleanup if you ever
+		// unify cleanup later. (Current cleanup deletes only sigils[name].)
+		// We'll address this properly when we wire EPHEMERAL + INVISIBLE fully.
+	}
+
+	// Optional trailing DOT
 	if i < len(tokens) && tokens[i].Type == TOK_DOT {
 		i++
 	}
@@ -1493,31 +1686,25 @@ func execSendBack(prog *Program, tokens []Token, i int, sigils sigilTable) (stri
 	startTok := tokens[i] // "SEND"
 	i++
 
-	// Skip any NEWLINEs immediately after SEND
 	for i < len(tokens) && tokens[i].Type == TOK_NEWLINE {
 		i++
 	}
 
-	// Require the word BACK by lexeme (case-insensitive),
-	// but don't care about token type.
 	if i >= len(tokens) || !strings.EqualFold(tokens[i].Lexeme, "BACK") {
 		return "", i, fmt.Errorf(
 			"SEND BACK: expected BACK after SEND at %s:%d:%d",
 			startTok.File, startTok.Line, startTok.Column,
 		)
 	}
-	i++ // consume BACK
+	i++
 
-	// Optional colon, e.g. SEND BACK: "OK".
 	if i < len(tokens) && tokens[i].Type == TOK_COLON {
 		i++
 	}
 
-	// ----------------------------------------------------
 	// Special-case: SEND BACK SIGIL name.
-	// ----------------------------------------------------
-	if i < len(tokens) && tokens[i].Type == TOK_SIGIL {
-		i++ // SIGIL
+	if i < len(tokens) && (tokens[i].Type == TOK_SIGIL || tokens[i].Type == TOK_SIGIL) {
+		i++
 
 		if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
 			return "", i, fmt.Errorf(
@@ -1529,7 +1716,6 @@ func execSendBack(prog *Program, tokens []Token, i int, sigils sigilTable) (stri
 		val, _ := getSigil(sigils, name)
 		i++
 
-		// Skip to end of statement (DOT / NEWLINE / ENDWORK)
 		for i < len(tokens) &&
 			tokens[i].Type != TOK_DOT &&
 			tokens[i].Type != TOK_NEWLINE &&
@@ -1539,13 +1725,15 @@ func execSendBack(prog *Program, tokens []Token, i int, sigils sigilTable) (stri
 		if i < len(tokens) && tokens[i].Type == TOK_DOT {
 			i++
 		}
+
+		// Redact if invisible
+		if isInvisibleSigil(sigils, name) {
+			return sicRedacted, i, nil
+		}
 		return val, i, nil
 	}
 
-	// ----------------------------------------------------
-	// General case: SEND BACK <expr>.
-	// Expression runs until DOT / NEWLINE / ENDWORK.
-	// ----------------------------------------------------
+	// General: SEND BACK <expr>.
 	exprStart := i
 	for i < len(tokens) &&
 		tokens[i].Type != TOK_DOT &&
@@ -1555,21 +1743,16 @@ func execSendBack(prog *Program, tokens []Token, i int, sigils sigilTable) (stri
 	}
 	exprEnd := i
 
-	// Slice out just the expression tokens for the engine
-	exprTokens := make([]Token, exprEnd-exprStart)
-	copy(exprTokens, tokens[exprStart:exprEnd])
-
-	val, err := evalStringExpr(prog, exprTokens, sigils)
+	val, tainted, err := evalStringExprTainted(prog, tokens[exprStart:exprEnd], sigils)
 	if err != nil {
 		return "", i, err
 	}
 
-	// Optional trailing DOT
 	if i < len(tokens) && tokens[i].Type == TOK_DOT {
 		i++
 	}
 
-	return val, i, nil
+	return redactIfTainted(val, tainted), i, nil
 }
 
 // ---------------- IF / ELSE / END ----------------
@@ -2694,10 +2877,8 @@ func execChoirBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 		}
 
 		if tok.Type != TOK_SUMMON {
-			return j, fmt.Errorf(
-				"CHOIR: only SUMMON statements are allowed inside CHOIR (found %s at %s:%d:%d)",
-				tok.Type, tok.File, tok.Line, tok.Column,
-			)
+			return j, fmt.Errorf("CHOIR: only SUMMON statements are allowed inside CHOIR, got %s at %s:%d:%d",
+				tok.Type, tok.File, tok.Line, tok.Column)
 		}
 
 		stmtStart := j
@@ -2715,13 +2896,12 @@ func execChoirBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 			j++
 		}
 
-		// Skip blank lines before next statement
 		for j < endPos && tokens[j].Type == TOK_NEWLINE {
 			j++
 		}
 	}
 
-	// No SUMMONs? Just skip CHOIR and move on.
+	// No SUMMONs? Skip CHOIR.
 	if len(starts) == 0 {
 		k := endPos + 1
 		if k < len(tokens) && tokens[k].Type == TOK_DOT {
@@ -2730,28 +2910,34 @@ func execChoirBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 		return k, nil
 	}
 
+	// Run summons in parallel, but with isolated sigils per summon.
+	errs := make([]error, len(starts))
 	var wg sync.WaitGroup
-	errs := make(chan error, len(starts))
+	wg.Add(len(starts))
 
-	for _, start := range starts {
-		wg.Add(1)
+	for idx, startIdx := range starts {
+		idx := idx
+		startIdx := startIdx
 
-		go func(startIdx int) {
+		go func() {
 			defer wg.Done()
-			// Use regular SUMMON semantics; ignore returned index since
-			// CHOIR controls its own scanning.
-			_, err := execSummonStmt(prog, tokens, startIdx, sigils)
-			if err != nil {
-				errs <- err
+
+			// Clone sigils for this summon (prevents races)
+			child := make(sigilTable)
+			for k, v := range sigils {
+				child[k] = v
 			}
-		}(start)
+
+			// Execute the summon statement using the cloned sigils
+			_, err := execSummonStmt(prog, tokens, startIdx, child)
+			errs[idx] = err
+		}()
 	}
 
 	wg.Wait()
-	close(errs)
 
-	// If any SUMMON failed, bubble the first error.
-	for err := range errs {
+	// Deterministic error: first in declaration order
+	for _, err := range errs {
 		if err != nil {
 			return endPos + 1, err
 		}
@@ -2795,7 +2981,7 @@ func injectRequestSigils(child sigilTable, r *http.Request) {
 		child["REQUEST_QUERY"] = ""
 	}
 
-	// Query params: Q_<KEY>
+	// Query params: Q_<KEY> (first value)
 	if r.URL != nil {
 		q := r.URL.Query()
 		for key, vals := range q {
@@ -2807,17 +2993,14 @@ func injectRequestSigils(child sigilTable, r *http.Request) {
 		}
 	}
 
-	// Body (best-effort)
+	// Body (best-effort): set REQUEST_BODY and rewind so others can still read it
+	child["REQUEST_BODY"] = ""
 	if r.Body != nil {
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err == nil {
 			child["REQUEST_BODY"] = string(bodyBytes)
-		} else {
-			child["REQUEST_BODY"] = ""
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes)) // rewind
 		}
-		// We don't need the body again in this runtime, so we don't re-wrap it.
-	} else {
-		child["REQUEST_BODY"] = ""
 	}
 }
 
@@ -2827,13 +3010,58 @@ func injectRequestSigils(child sigilTable, r *http.Request) {
 //  2. ".json" suffix on the route path -> application/json
 //  3. fallback to the provided defaultCT.
 func chooseContentType(defaultCT, path string, sigils sigilTable) string {
-	if ct, ok := sigils["response_content_type"]; ok && ct != "" {
-		return ct
+	if sigils != nil {
+		if ct, ok := sigils["response_content_type"]; ok && strings.TrimSpace(ct) != "" {
+			return strings.TrimSpace(ct)
+		}
 	}
 	if strings.HasSuffix(path, ".json") {
 		return "application/json; charset=utf-8"
 	}
 	return defaultCT
+}
+
+func getResponseStatus(sigils sigilTable) int {
+	if sigils == nil {
+		return http.StatusOK
+	}
+	raw := strings.TrimSpace(sigils["response_status"])
+	if raw == "" {
+		return http.StatusOK
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 100 || n > 599 {
+		return http.StatusOK
+	}
+	return n
+}
+
+func applyResponseHeaders(w http.ResponseWriter, sigils sigilTable) {
+	if w == nil || sigils == nil {
+		return
+	}
+	for k, v := range sigils {
+		if !strings.HasPrefix(k, "response_header_") {
+			continue
+		}
+		hname := strings.TrimPrefix(k, "response_header_")
+		hname = strings.ReplaceAll(hname, "_", "-")
+		hname = strings.TrimSpace(hname)
+		if hname == "" {
+			continue
+		}
+		w.Header().Set(hname, v)
+	}
+}
+
+func pickResponseBody(defaultBody string, sigils sigilTable) string {
+	if sigils == nil {
+		return defaultBody
+	}
+	if b := strings.TrimSpace(sigils["response_body"]); b != "" {
+		return b
+	}
+	return defaultBody
 }
 
 // ---------------- ALTAR / ROUTE Canticle ----------------
@@ -2911,14 +3139,14 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 	altarMu.Lock()
 	if globalAltar == nil {
 		globalAltar = &altarServer{
-			addr: addr,
-			mux:  http.NewServeMux(),
+			addr:       addr,
+			mux:        http.NewServeMux(),
+			registered: make(map[string]bool),
 		}
 	} else if globalAltar.addr != addr {
 		prev := globalAltar.addr
 		altarMu.Unlock()
-		return i, fmt.Errorf("ALTAR: server already bound to %s, cannot rebind to %s",
-			prev, addr)
+		return i, fmt.Errorf("ALTAR: server already bound to %s, cannot bind to %s", prev, addr)
 	}
 
 	srv := globalAltar
@@ -2949,11 +3177,12 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 			if i < len(tokens) && tokens[i].Type == TOK_DOT {
 				i++
 			}
-			break
+			// IMPORTANT: ALTAR does not own process lifetime.
+			return i, nil
 		}
 
 		if tok.Type != TOK_ROUTE {
-			return i, fmt.Errorf("ALTAR: expected ROUTE or ENDALTAR, found %s at %s:%d:%d",
+			return i, fmt.Errorf("ALTAR: expected ROUTE or ENDALTAR, got %s at %s:%d:%d",
 				tok.Type, tok.File, tok.Line, tok.Column)
 		}
 		i++ // after ROUTE
@@ -2972,17 +3201,11 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 
 		// Path
 		if i >= len(tokens) {
-			return i, fmt.Errorf("ALTAR: missing path after method at %s:%d:%d",
-				tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
+			return i, fmt.Errorf("ALTAR: missing path after method %s at %s:%d:%d",
+				method, tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
 		}
-		var path string
-		if tokens[i].Type == TOK_STRING {
-			path = tokens[i].Lexeme
-			i++
-		} else {
-			path = tokens[i].Lexeme
-			i++
-		}
+		path := tokens[i].Lexeme
+		i++
 
 		// Expect IDENT "TO"
 		if i >= len(tokens) || !(tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "TO")) {
@@ -3003,8 +3226,8 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 			i++ // WORK
 
 			if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
-				return i, fmt.Errorf("ALTAR: expected WORK name after TO at %s:%d:%d",
-					tokens[i].File, tokens[i].Line, tokens[i].Column)
+				return i, fmt.Errorf("ALTAR: expected WORK name after WORK at %s:%d:%d",
+					tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
 			}
 			handlerName := tokens[i].Lexeme
 			i++
@@ -3014,15 +3237,21 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 				i++
 			}
 
-			fmt.Printf("[SIC ALTAR ROUTE] Route %s %s -> WORK %s\n",
-				method, path, handlerName)
+			fmt.Printf("[SIC ALTAR ROUTE] Route %s %s -> WORK %s\n", method, path, handlerName)
 
-			// Register handler using existing WORK semantics
 			altarMu.Lock()
+
+			routeKey := method + " " + path
+			if srv.registered[routeKey] {
+				altarMu.Unlock()
+				return i, fmt.Errorf("ALTAR: duplicate route %s", routeKey)
+			}
+			srv.registered[routeKey] = true
+
 			m := method
 			p := path
 			h := handlerName
-			parentSigils := sigils
+			parent := sigils
 			mux := srv.mux
 
 			mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
@@ -3033,38 +3262,39 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 
 				work := findWork(prog, h)
 				if work == nil {
-					fmt.Fprintf(os.Stderr, "[SIC ALTAR] handler WORK %s not found\n", h)
-					http.Error(w, "handler not found", http.StatusInternalServerError)
+					http.Error(w, "handler not found", http.StatusNotFound)
 					return
 				}
 
-				// Clone sigils like SUMMON does
+				// Clone sigils (request-local state)
 				child := make(sigilTable)
-				for k, v := range parentSigils {
-					child[k] = v
-				}
+				cloneVisibleSigils(child, parent)
 
 				// Inject request details into SIGILs
 				injectRequestSigils(child, r)
 
 				// Capture the ritual's answer as HTTP body
-				body, err := execWork(prog, work, child, true /* captureAnswer */)
+				body, err := execWork(prog, work, child, true)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "[SIC ALTAR] handler %s error: %v\n", h, err)
 					http.Error(w, "internal error", http.StatusInternalServerError)
 					return
 				}
-
 				if body == "" {
 					body = "OK"
 				}
 
-				// Decide Content-Type:
-				// - SIGIL response_content_type wins if set,
-				// - else .json suffix -> application/json,
-				// - else fall back to text/plain.
+				// Allow overrides via sigils
+				body = pickResponseBody(body, child)
+
+				// Apply headers + content type
+				applyResponseHeaders(w, child)
 				ct := chooseContentType("text/plain; charset=utf-8", p, child)
 				w.Header().Set("Content-Type", ct)
+
+				// Status
+				status := getResponseStatus(child)
+				w.WriteHeader(status)
+
 				_, _ = w.Write([]byte(body + "\n"))
 			})
 
@@ -3074,20 +3304,18 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 
 		// ----------------------------------------------------
 		// 2) ROUTE ... TO SEND BACK <expr>.
-		//    BACK is optional; SEND <expr> also works.
 		// ----------------------------------------------------
 		if tokens[i].Type == TOK_SEND {
-			i++ // consume SEND
+			i++ // SEND
 
 			// Allow blank lines between SEND and BACK/expression
 			for i < len(tokens) && tokens[i].Type == TOK_NEWLINE {
 				i++
 			}
 
-			// Optional BACK keyword (by lexeme, any token type)
+			// Optional BACK keyword (by lexeme)
 			if i < len(tokens) && strings.EqualFold(tokens[i].Lexeme, "BACK") {
 				i++ // after BACK
-
 				// Optional colon, e.g. SEND BACK: "OK".
 				if i < len(tokens) && tokens[i].Type == TOK_COLON {
 					i++
@@ -3113,15 +3341,21 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 				i++
 			}
 
-			fmt.Printf("[SIC ALTAR ROUTE] Route %s %s -> inline SEND BACK\n",
-				method, path)
+			fmt.Printf("[SIC ALTAR ROUTE] Route %s %s -> inline SEND BACK\n", method, path)
 
 			altarMu.Lock()
+
+			routeKey := method + " " + path
+			if srv.registered[routeKey] {
+				altarMu.Unlock()
+				return i, fmt.Errorf("ALTAR: duplicate route %s", routeKey)
+			}
+			srv.registered[routeKey] = true
 
 			m := method
 			p := path
 			exprCopy := exprTokens
-			parentSigils := sigils
+			parent := sigils
 			mux := srv.mux
 
 			mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
@@ -3130,25 +3364,33 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 					return
 				}
 
-				// Clone sigils like SUMMON does
+				// Clone sigils (request-local state)
 				child := make(sigilTable)
-				for k, v := range parentSigils {
-					child[k] = v
-				}
+				cloneVisibleSigils(child, parent)
 
 				// Inject request details into SIGILs
 				injectRequestSigils(child, r)
 
 				val, err := evalStringExpr(prog, exprCopy, child)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "[SIC ALTAR] inline SEND BACK error: %v\n", err)
 					http.Error(w, "internal error", http.StatusInternalServerError)
 					return
 				}
+				if val == "" {
+					val = "OK"
+				}
 
-				// Same content-type logic as WORK handlers
+				// Allow overrides via sigils
+				val = pickResponseBody(val, child)
+
+				applyResponseHeaders(w, child)
+
 				ct := chooseContentType("text/plain; charset=utf-8", p, child)
 				w.Header().Set("Content-Type", ct)
+
+				status := getResponseStatus(child)
+				w.WriteHeader(status)
+
 				_, _ = w.Write([]byte(val + "\n"))
 			})
 
@@ -3156,14 +3398,13 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 			continue
 		}
 
-		// If we reach here, token after TO was neither WORK nor SEND
+		// If token after TO was neither WORK nor SEND
 		return i, fmt.Errorf("ALTAR: expected WORK or SEND after TO at %s:%d:%d",
 			tokens[i].File, tokens[i].Line, tokens[i].Column)
 	}
 
-	// ---------- BLOCK HERE: keep process alive ----------
-	fmt.Fprintf(os.Stderr, "[SIC ALTAR] ALTAR is now holding the process open on %s.\n", addr)
-	select {} // block forever; never return to MAIN
+	return i, fmt.Errorf("ALTAR: missing ENDALTAR for block starting at %s:%d:%d",
+		startTok.File, startTok.Line, startTok.Column)
 }
 
 // SUMMON as a statement: ignore the returned value, keep side-effects.
@@ -3212,6 +3453,8 @@ func evalSummonExpr(prog *Program, tokens []Token, start int, sigils sigilTable)
 	i++
 
 	argVal := ""
+	argFromSigil := ""       // if the arg was IDENT, track which sigil name
+	argWasInvisible := false // if argFromSigil was invisible, propagate invisibility to callee param
 
 	// Optional: WITH SIGIL <arg>
 	if i < len(tokens) && tokens[i].Type == TOK_WITH {
@@ -3221,21 +3464,26 @@ func evalSummonExpr(prog *Program, tokens []Token, start int, sigils sigilTable)
 		}
 
 		if i >= len(tokens) {
-			return "", 0, fmt.Errorf("SUMMON: missing argument after WITH for WORK %s", targetName)
+			return "", 0, fmt.Errorf("SUMMON: missing argument after WITH")
 		}
 
 		switch tokens[i].Type {
 		case TOK_STRING:
 			argVal = tokens[i].Lexeme
 			i++
+
 		case TOK_IDENT:
-			// treat as sigil name
-			argVal, _ = getSigil(sigils, tokens[i].Lexeme)
+			// Treat as sigil name (explicit reference = intentional)
+			argFromSigil = tokens[i].Lexeme
+			argVal, _ = getSigil(sigils, argFromSigil)
+			argWasInvisible = isInvisibleSigil(sigils, argFromSigil)
 			i++
+
 		case TOK_UNUSED:
 			// Sentinel: explicit "no argument" / ignored parameter
 			argVal = ""
 			i++
+
 		default:
 			return "", 0, fmt.Errorf("SUMMON: unsupported argument token %s at %s:%d:%d",
 				tokens[i].Type, tokens[i].File, tokens[i].Line, tokens[i].Column)
@@ -3247,13 +3495,24 @@ func evalSummonExpr(prog *Program, tokens []Token, start int, sigils sigilTable)
 		return "", 0, fmt.Errorf("SUMMON: WORK %s not found", targetName)
 	}
 
-	// Build child environment: inherit sigils, override first parameter if present
+	// Build child environment:
+	// - inherit only VISIBLE sigils by default
+	// - set the first param to argVal if present
 	childSigils := make(sigilTable)
-	for k, v := range sigils {
-		childSigils[k] = v
-	}
+
+	// Copy only visible sigils (and skip all meta keys)
+	cloneVisibleSigils(childSigils, sigils)
+
+	// If the callee expects a first parameter, bind it.
 	if len(target.SigilParams) > 0 {
-		childSigils[target.SigilParams[0]] = argVal
+		param := target.SigilParams[0]
+		childSigils[param] = argVal
+
+		// If the caller explicitly referenced an invisible sigil as the argument,
+		// that is an intentional reveal/copy into the callee param — keep it invisible there too.
+		if argFromSigil != "" && argWasInvisible {
+			markInvisibleSigil(childSigils, param)
+		}
 	}
 
 	result, err := execWork(prog, target, childSigils, true)

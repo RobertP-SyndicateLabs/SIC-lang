@@ -1,0 +1,20 @@
+LANGUAGE "SIC 1.0".
+SCROLL choir_isolation_demo
+MODE CHANT.
+
+WORK TASK WITH SIGIL name AS TEXT:
+    SAY: "Task running: " + name + ".".
+    LET SIGIL shared BE "mutated_by_" + name.
+ENDWORK.
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+    LET SIGIL shared BE "original".
+
+    CHOIR:
+        SUMMON WORK TASK WITH name AS "A".
+        SUMMON WORK TASK WITH name AS "B".
+        SUMMON WORK TASK WITH name AS "C".
+    ENDCHOIR.
+
+    SAY: "After CHOIR, shared is: " + SIGIL shared + ".".
+ENDWORK.

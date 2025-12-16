@@ -1,0 +1,29 @@
+LANGUAGE "SIC 1.0".
+SCROLL altar_response_demo
+MODE CHANT.
+
+WORK JSON_OK WITH SIGIL UNUSED AS TEXT:
+    LET SIGIL response_status BE "200".
+    LET SIGIL response_content_type BE "application/json; charset=utf-8".
+    LET SIGIL response_header_Cache_Control BE "no-store".
+    SEND BACK "{\"ok\":true}".
+ENDWORK.
+
+WORK NOT_FOUND WITH SIGIL UNUSED AS TEXT:
+    LET SIGIL response_status BE "404".
+    SEND BACK "not found".
+ENDWORK.
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+    SAY: "Raising ALTAR response demo.".
+    ALTAR AT :15080:
+        ROUTE GET "/ok.json" TO WORK JSON_OK.
+        ROUTE GET "/nope" TO WORK NOT_FOUND.
+    ENDALTAR.
+
+    SAY: "ALTAR active (CTRL+C to exit)." .
+    LET SIGIL forever BE "yes".
+    WHILE SIGIL forever EQUALS "yes":
+        SLEEP FOR 1000 SECONDS.
+    ENDWHILE.
+ENDWORK.
