@@ -1,352 +1,290 @@
-SIC v0.3 Runtime Semantics
+# SIC Language Semantics
 
-Expression Canticle — Official Semantics
+**Version:** v0.3 — Expression Canticle  
+**Status:** Stable, deterministic, fully specified
 
-This document defines the normative runtime semantics for SIC v0.3 with a focus on ALTAR (service orchestration) and CHOIR (parallel execution). It is intended to remove ambiguity, lock behavior, and serve as a reference for contributors, implementers, and users.
+This document defines the formal execution semantics of **SIC (Structured Intent Canticle)**.
+It describes how SIC scrolls are interpreted, how state behaves, and what guarantees the
+runtime provides.
 
+This is not an implementation guide.
+This is the contract between the language and its users.
 
 
-1. Foundational Principles
 
-SIC execution is governed by four non-negotiable principles:
+## 1. Core Execution Model
 
-1. Determinism — Given the same scroll and inputs, observable behavior must not vary.
+SIC executes code through **WORKs**.
 
+A WORK is:
+- The only executable unit
+- Entered explicitly
+- Executed deterministically
+- Scoped in both state and failure
 
-2. Explicitness — All state, control flow, and side effects must be declared.
+There is no implicit execution.
+There is no hidden control flow.
 
+Execution always proceeds forward, token by token, within a WORK body.
 
-3. Isolation — Concurrent execution must not create implicit shared state.
 
 
-4. Responsibility — Failure is structured, surfaced, and handled deliberately.
+## 2. WORK Semantics
 
+A WORK:
 
+- Has a name
+- May declare SIGIL parameters
+- Executes sequentially unless an orchestration construct is used
+- May return a value via `THUS WE ANSWER` or `SEND BACK`
 
-ALTAR and CHOIR are extensions of these principles — not exceptions to them.
+If a WORK completes without returning a value:
+- It returns an empty result
+- This is not an error
 
+WORKs may be marked **EPHEMERAL**, in which case all EPHEMERAL sigils created within them
+are scrubbed upon exit, regardless of how execution terminates.
 
 
-2. Execution Model Overview
 
-At runtime, SIC operates as a single orchestrating process that may:
+## 3. Sigils (State)
 
-Execute WORKs sequentially
+### 3.1 SIGIL Definition
 
-Execute WORKs concurrently (CHOIR)
+SIGILs are named state values.
+All SIGIL values are text at rest and may be interpreted as numbers or booleans by expressions.
 
-Expose WORKs as HTTP endpoints (ALTAR)
+SIGILs are:
+- Explicit
+- Mutable only via `LET`
+- Scoped by execution context
 
+There is no global mutable state outside of SIGILs.
 
-All execution ultimately flows through execWork, which:
 
-Receives a sigil table (state)
 
-Executes statements in order
+### 3.2 Ephemeral Sigils
 
-May spawn controlled concurrent execution
+An EPHEMERAL sigil:
 
+- Exists only for the duration of the current WORK (or EPHEMERAL block)
+- Is automatically removed on any exit path:
+  - Normal completion
+  - `SEND BACK`
+  - `THUS`
+  - OMEN failure
 
+EPHEMERAL behavior is enforced by the runtime and cannot be bypassed.
 
 
-3. Sigils and State Semantics
 
-3.1 Sigil Tables
+## 4. Sigil Visibility and Invisibility
 
-A sigil table is a key → value mapping representing all visible state for a WORK invocation.
+SIGILs exist in two visibility classes:
 
-Properties:
+### 4.1 Visible Sigils
 
-Sigils are lexically scoped
+Visible sigils:
+- Are addressable by user code
+- May be read, written, and printed
+- May participate in expressions
+- May be passed into WORKs
 
-Sigils are copied, not shared, across concurrency boundaries
+This is the default.
 
-Mutation (LET) only affects the local table
 
 
-3.2 Isolation Rule (Hard Guarantee)
+### 4.2 Invisible Sigils
 
-> No concurrent execution may mutate shared sigil state.
+Invisible sigils:
+- Are runtime-reserved
+- Are not addressable by user expressions
+- Do not appear in output
+- Do not leak across scope boundaries unless explicitly allowed
 
+Invisible sigils may:
+- Influence execution
+- Control orchestration behavior
+- Affect ALTAR responses
+- Carry runtime metadata
 
+Invisibility is **semantic**, not cosmetic.
+To user code, invisible sigils are treated as nonexistent.
 
-This rule applies universally:
 
-CHOIR
 
-ALTAR request handlers
+## 5. Expressions
 
-SUMMON
+Expressions are evaluated deterministically.
 
+Supported features include:
+- Arithmetic
+- Boolean logic
+- Comparisons
+- String concatenation
+- Parentheses
+- `SUMMON` as an expression
 
-The runtime enforces this by cloning sigil tables before execution.
+Expressions:
+- Have no side effects
+- May read visible sigils
+- May not mutate state directly
 
 
 
-4. ALTAR Semantics (HTTP Orchestration)
+## 6. Control Flow
 
-4.1 Purpose
+### 6.1 IF / WHILE
 
-ALTAR binds SIC WORKs and expressions to HTTP routes, turning a scroll into a live service.
+Control flow is explicit and deterministic.
 
-ALTAR is:
+- IF blocks evaluate conditions once
+- WHILE loops reevaluate conditions on each iteration
+- There is no implicit break or continue
 
-Declarative
 
-Deterministic
 
-Process-scoped
+### 6.2 Failure and OMEN
 
+Failures are structured.
 
-It is not a general web framework.
+An OMEN:
+- Is explicitly raised
+- Has a name
+- May be handled by an OMEN block
 
+If an OMEN is unhandled:
+- Execution terminates
+- The error propagates upward
 
+OMEN handling does not suppress cleanup.
+EPHEMERAL sigils are always scrubbed.
 
-4.2 ALTAR Lifecycle
 
-ALTAR AT :15080:
-    ROUTE GET "/hello" TO WORK HELLO.
-ENDALTAR.
 
-Semantics:
+## 7. SUMMON
 
-1. ALTAR initializes (or reuses) a singleton HTTP server
+`SUMMON` invokes a WORK.
 
+SUMMON semantics:
+- Clone visible sigils into a child environment
+- Bind declared parameters
+- Execute the target WORK
+- Return its result (if any)
 
-2. Routes are registered during scroll execution
+SUMMON does not share mutable state.
+Each invocation is isolated unless explicitly designed otherwise.
 
 
-3. Server begins listening asynchronously
 
+## 8. WEAVE
 
-4. Control returns to the WORK after ENDALTAR
+WEAVE defines **sequential orchestration**.
 
+Inside a WEAVE:
+- Only SUMMON statements are allowed
+- Each SUMMON executes in order
+- Failure halts the WEAVE immediately
 
+WEAVE introduces no concurrency.
 
-> ALTAR does not block execution.
 
 
+## 9. CHOIR
 
-Process lifetime is controlled by the scroll (e.g. via WHILE, SLEEP).
+CHOIR defines **parallel orchestration**.
 
+Inside a CHOIR:
+- Only SUMMON statements are allowed
+- Each SUMMON executes concurrently
+- All SUMMONs receive an identical snapshot of visible sigils
 
+### CHOIR Guarantees
 
-4.3 Singleton Rule
+- No nondeterministic shared state mutation
+- No execution order dependence
+- Failure propagates after all active SUMMONs complete
 
-Only one ALTAR server may exist per process
+CHOIR guarantees that concurrency does not alter observable program behavior.
 
-All ALTAR blocks must bind to the same address
 
-Attempting to bind a different address is a runtime error
 
+## 10. ALTAR (HTTP Services)
 
-This prevents ambiguous network behavior.
+ALTAR defines HTTP service bindings.
 
+An ALTAR:
+- Binds to a single address
+- Registers routes deterministically
+- Starts a server if one is not already running
 
+### 10.1 ALTAR Lifetime
 
-4.4 ROUTE Semantics
+ALTAR does **not** own process lifetime.
 
-Two routing forms are supported:
+- ALTAR activation returns control to the calling WORK
+- The server runs alongside execution
+- Multiple ALTAR blocks may coexist if bound to the same address
 
-4.4.1 ROUTE → WORK
 
-ROUTE GET "/hello" TO WORK HELLO.
 
-For each request:
+### 10.2 ROUTE Semantics
 
-1. Parent sigils are cloned
+Each ROUTE:
+- Binds an HTTP method and path
+- Maps to either:
+  - A WORK
+  - An inline `SEND BACK` expression
 
+Duplicate routes are rejected.
 
-2. Request sigils are injected
+Each request:
+- Receives a fresh sigil environment
+- Includes injected request sigils
+- Cannot mutate shared runtime state
 
 
-3. WORK is executed
 
+## 11. Determinism Guarantees
 
-4. SEND BACK result becomes HTTP body
+SIC guarantees:
 
+- Deterministic execution for identical inputs
+- Explicit failure paths
+- No hidden state
+- No implicit concurrency effects
+- No observable race conditions
 
+Parallel execution does not compromise predictability.
 
-If the WORK produces no body, "OK" is returned.
 
 
+## 12. Completion Semantics
 
-4.4.2 ROUTE → SEND BACK
+If a WORK is executed with capture enabled:
+- The first `THUS WE ANSWER` or `SEND BACK` returns immediately
 
-ROUTE GET "/info" TO SEND BACK "hello".
+If no answer is produced:
+- The result is empty
+- This is not an error
 
-The expression is evaluated per request with request-local sigils.
+Top-level WORKs may complete without returning a value.
 
 
 
-4.5 Request Sigil Injection
+## 13. Semantic Stability
 
-For every ALTAR request, the following SIGILs are injected (TEXT):
+This document defines the complete semantics of SIC v0.3.
 
-SIGIL	Meaning
+Future versions may:
+- Extend semantics
+- Introduce new constructs
+- Add dialects (e.g. SIC_D)
 
-REQUEST_METHOD	HTTP method
-REQUEST_PATH	URL path
-REQUEST_QUERY	Raw query string
-REQUEST_BODY	Request body
-Q_<NAME>	Query parameters
+They will not retroactively change the meaning of existing constructs.
 
 
-These sigils are read-only by convention.
 
-
-
-4.6 Response Semantics
-
-Content-Type resolution order:
-
-1. response_content_type SIGIL (if set)
-
-
-2. .json path suffix → application/json
-
-
-3. Fallback (text/plain; charset=utf-8)
-
-
-
-Status codes are currently implicit (200 / 404).
-
-
-
-5. CHOIR Semantics (Parallel Execution)
-
-5.1 Purpose
-
-CHOIR executes multiple SUMMON statements concurrently while preserving determinism and isolation.
-
-CHOIR:
-    SUMMON WORK A.
-    SUMMON WORK B.
-ENDCHOIR.
-
-
-
-5.2 Structural Rules
-
-Inside CHOIR:
-
-Only SUMMON statements are permitted
-
-Order of execution is undefined
-
-Completion is synchronized
-
-
-Violations are runtime errors.
-
-
-
-5.3 Isolation Semantics
-
-Each SUMMON inside CHOIR receives:
-
-A cloned sigil table
-
-No shared mutable state
-
-
-Parent sigils remain unchanged after CHOIR completes.
-
-This is a hard guarantee.
-
-
-
-5.4 Error Semantics
-
-All SUMMONs execute
-
-Errors are collected
-
-First error (if any) is surfaced
-
-
-No partial cancellation occurs.
-
-
-
-6. Ephemeral Execution (Forward-Compatible)
-
-6.1 EPHEMERAL Sigils (Existing)
-
-EPHEMERAL SIGILs are:
-
-Automatically scoped
-
-Auto-scrubbed after execution
-
-
-
-
-6.2 Proposed: EPHEMERAL ALTAR (Future)
-
-Concept:
-
-EPHEMERAL ALTAR AT :15080:
-    ROUTE GET "/once" TO WORK TASK.
-ENDALTAR.
-
-Semantics:
-
-ALTAR exists for the lifetime of the enclosing WORK
-
-Automatically unregistered on exit
-
-Useful for testing, callbacks, and transient services
-
-
-
-
-6.3 Proposed: EPHEMERAL CHOIR (Future)
-
-Concept:
-
-EPHEMERAL CHOIR:
-    SUMMON WORK TEMP_A.
-    SUMMON WORK TEMP_B.
-ENDCHOIR.
-
-Semantics:
-
-Same isolation guarantees
-
-Additional guarantee: no external side effects permitted
-
-
-This would formalize pure parallel computation.
-
-
-
-7. Guarantees Summary
-
-SIC v0.3 guarantees:
-
-No hidden shared state
-
-Deterministic orchestration
-
-Explicit concurrency
-
-Structured failure
-
-Inspectable execution
-
-
-These semantics are considered stable for v0.3.x.
-
-
-
-8. Closing
-
-SIC treats orchestration as a first-class responsibility.
-
-ALTAR governs interaction with the world. CHOIR governs parallel intention.
-
-Neither compromises clarity. Neither compromises determinism.
-
-This is by design.
+SIC is a language of intention.
+What is written is what executes.
+What executes is what was written.
