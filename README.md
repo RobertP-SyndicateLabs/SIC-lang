@@ -396,3 +396,9 @@ If you’re foolish, summon a CHOIR.
 And if you’re wise —
 
 SIC will orchestrate your systems.
+
+## Language Semantics
+
+The official runtime semantics for SIC v0.3 are defined here:
+
+📜 [SIC v0.3 Runtime Semantics](docs/semantics/v0.3-runtime-semantics.md)
