@@ -1,0 +1,28 @@
+LANGUAGE "SIC 1.0".
+SCROLL invisibility_demo
+MODE CHANT.
+
+WORK CHILD WITH SIGIL UNUSED AS TEXT:
+    SAY: "CHILD attempting SECRET.".
+
+    OMEN "missing":
+        SAY: SECRET.
+    FALLS_TO_RUIN:
+        SAY: "SECRET is not visible to CHILD (correct).".
+    ENDOMEN.
+
+    SEND BACK "OK".
+ENDWORK.
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+    SAY: "Setting invisible SECRET in parent.".
+    INVISIBLE SIGIL SECRET BE "doom".
+
+    SAY: "Parent can still use SECRET internally:".
+    SAY: SECRET.
+
+    SAY: "Now SUMMON CHILD. CHILD should NOT receive SECRET.".
+    SUMMON WORK CHILD.
+
+    SAY: "End.".
+ENDWORK.

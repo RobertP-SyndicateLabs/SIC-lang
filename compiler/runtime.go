@@ -149,7 +149,7 @@ func exprSingleSigilRef(exprTokens []Token) (string, bool) {
 	}
 
 	// SIGIL <ident>
-	if len(toks) == 2 && (toks[0].Type == TOK_SIGIL || toks[0].Type == TOK_SIGIL) && toks[1].Type == TOK_IDENT {
+	if len(toks) == 2 && toks[0].Type == TOK_SIGIL {
 		return toks[1].Lexeme, true
 	}
 
@@ -171,6 +171,16 @@ func redactIfInvisible(sigils sigilTable, name, val string) string {
 		return sicRedacted
 	}
 	return val
+}
+
+const sicOmenTryMetaKey = "__SIC_IN_OMEN_TRY"
+
+func inOmenTry(sigils sigilTable) bool {
+	if sigils == nil {
+		return false
+	}
+	_, ok := sigils[sicOmenTryMetaKey]
+	return ok
 }
 
 // omenError is raised by RAISE OMEN and caught by OMEN ... FALLS_TO_RUIN.
@@ -810,7 +820,8 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 	tok := tokens[*i]
 
 	// Skip glue words inside expressions
-	if tok.Type == TOK_FOR || tok.Type == TOK_SECONDS || tok.Type == TOK_SECONDS ||
+
+	if tok.Type == TOK_FOR || tok.Type == TOK_SECONDS ||
 		(tok.Type == TOK_IDENT && (strings.EqualFold(tok.Lexeme, "BY") ||
 			strings.EqualFold(tok.Lexeme, "FOR") ||
 			strings.EqualFold(tok.Lexeme, "SECONDS"))) {
@@ -841,6 +852,9 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 
 		val, ok := sigils[name]
 		if !ok {
+			if inOmenTry(sigils) {
+				return exprValue{}, &omenError{name: "missing"} // OMEN "missing"
+			}
 			return exprValue{}, fmt.Errorf("unknown SIGIL %s at %s:%d:%d",
 				name, nameTok.File, nameTok.Line, nameTok.Column)
 		}
@@ -868,6 +882,9 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 
 		val, ok := sigils[name]
 		if !ok {
+			if inOmenTry(sigils) {
+				return exprValue{}, &omenError{name: "missing"} // OMEN "missing"
+			}
 			return exprValue{}, fmt.Errorf("unknown SIGIL %s at %s:%d:%d",
 				name, nameTok.File, nameTok.Line, nameTok.Column)
 		}
@@ -903,9 +920,13 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 
 		val, ok := sigils[tok.Lexeme]
 		if !ok {
+			if inOmenTry(sigils) {
+				return exprValue{}, &omenError{name: "missing"} // OMEN "missing"
+			}
 			return exprValue{}, fmt.Errorf("unknown SIGIL %s at %s:%d:%d",
 				tok.Lexeme, tok.File, tok.Line, tok.Column)
 		}
+
 		*i++
 
 		v := coerce(val)
@@ -1012,6 +1033,15 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 		case TOK_SAY:
 			// SAY: <expr>.
 			next, err := execSay(prog, tokens, i, sigils)
+			if err != nil {
+				return "", err
+			}
+			i = next
+			continue
+
+		case TOK_INVISIBLE:
+			// INVISIBLE SIGIL X BE ...
+			next, _, err := execInvisibleSigil(prog, tokens, i, sigils)
 			if err != nil {
 				return "", err
 			}
@@ -1150,6 +1180,7 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 				}
 				i = next
 				continue
+
 			}
 
 			// other idents fall through
@@ -1370,8 +1401,7 @@ func parseSigilTarget(tokens []Token, i int) (string, int, error) {
 	// Optional keyword SIGIL:
 	// - lexer emits TOK_SIGIL for keyword "SIGIL"
 	// - tolerate IDENT "SIGIL" too, just in case
-	if tokens[i].Type == TOK_SIGIL ||
-		(tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "SIGIL")) {
+	if tokens[i].Type == TOK_SIGIL {
 		i++
 		if i >= len(tokens) {
 			return "", i, fmt.Errorf("expected name after SIGIL")
@@ -1402,6 +1432,60 @@ func parseSigilTarget(tokens []Token, i int) (string, int, error) {
 	return name, i + 1, nil
 }
 
+// execInvisibleSigil executes:
+//
+//	INVISIBLE SIGIL <name> BE <expr>.
+//
+// Also tolerates "INVISIBLE <name> BE <expr>." (SIGIL keyword optional)
+func execInvisibleSigil(prog *Program, tokens []Token, i int, sigils sigilTable) (next int, name string, err error) {
+	startTok := tokens[i] // IDENT "INVISIBLE" (or TOK_INVISIBLE later)
+	i++
+
+	// Optional SIGIL keyword
+	if i < len(tokens) && tokens[i].Type == TOK_SIGIL {
+		i++
+	}
+
+	// Name
+	if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
+		return i, "", fmt.Errorf("INVISIBLE: expected SIGIL name at %s:%d:%d",
+			startTok.File, startTok.Line, startTok.Column)
+	}
+	name = tokens[i].Lexeme
+	i++
+
+	// Expect BE
+	if i >= len(tokens) || !(tokens[i].Type == TOK_BE ||
+		(tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "BE"))) {
+		return i, "", fmt.Errorf("INVISIBLE: expected BE after SIGIL %s at %s:%d:%d",
+			name, tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
+	}
+	i++
+
+	// Expression until DOT / NEWLINE / ENDWORK
+	exprStart := i
+	for i < len(tokens) &&
+		tokens[i].Type != TOK_DOT &&
+		tokens[i].Type != TOK_NEWLINE &&
+		tokens[i].Type != TOK_ENDWORK {
+		i++
+	}
+
+	val, err := evalStringExpr(prog, tokens[exprStart:i], sigils)
+	if err != nil {
+		return i, "", err
+	}
+
+	setSigilInvisible(sigils, name, val)
+
+	// Optional DOT
+	if i < len(tokens) && tokens[i].Type == TOK_DOT {
+		i++
+	}
+
+	return i, name, nil
+}
+
 // ---------------- LET SIGIL ----------------
 //
 // Accepts all of:
@@ -1418,33 +1502,42 @@ func execLet(prog *Program, tokens []Token, i int, sigils sigilTable, ephemeral 
 	startTok := tokens[i] // TOK_LET
 	i++
 
-	// Optional EPHEMERAL
 	isEphemeral := false
-	if i < len(tokens) && tokens[i].Type == TOK_EPHEMERAL {
-		isEphemeral = true
-		i++
-	}
-
-	// Optional INVISIBLE (either dedicated token if you add one later,
-	// or IDENT "INVISIBLE" for now)
 	isInvisible := false
-	if i < len(tokens) {
-		if tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "INVISIBLE") {
+
+	// Allow modifiers in any order and tolerate IDENT forms.
+	for i < len(tokens) {
+		switch tokens[i].Type {
+		case TOK_EPHEMERAL:
+			isEphemeral = true
+			i++
+			continue
+		case TOK_INVISIBLE:
 			isInvisible = true
 			i++
+			continue
+		case TOK_IDENT:
+			if strings.EqualFold(tokens[i].Lexeme, "EPHEMERAL") {
+				isEphemeral = true
+				i++
+				continue
+			}
+			if strings.EqualFold(tokens[i].Lexeme, "INVISIBLE") {
+				isInvisible = true
+				i++
+				continue
+			}
 		}
-		// If you later add TOK_INVISIBLE, you can also accept it here:
-		// if tokens[i].Type == TOK_INVISIBLE { isInvisible = true; i++ }
+		break
 	}
 
 	// Parse target name:
 	//   LET [EPHEMERAL] [INVISIBLE] SIGIL X BE ...
-	//   LET [EPHEMERAL] [INVISIBLE] X BE ...              (allowed)
-	//   LET [EPHEMERAL] [INVISIBLE] $X BE ...             (tolerated)
+	//   LET [EPHEMERAL] [INVISIBLE] X BE ...
+	//   LET [EPHEMERAL] [INVISIBLE] $X BE ...
 	name, next, err := parseSigilTarget(tokens, i)
 	if err != nil {
-		return i, fmt.Errorf("LET: %v at %s:%d:%d",
-			err, startTok.File, startTok.Line, startTok.Column)
+		return i, fmt.Errorf("LET: %v at %s:%d:%d", err, startTok.File, startTok.Line, startTok.Column)
 	}
 	i = next
 
@@ -1475,19 +1568,15 @@ func execLet(prog *Program, tokens []Token, i int, sigils sigilTable, ephemeral 
 		setSigilInvisible(sigils, name, val) // sets value + marks invisible
 	} else {
 		setSigil(sigils, name, val)
-		// Optional: if overwriting a previously invisible sigil, you might
-		// choose to keep it invisible or clear invisibility. Current choice:
-		// leave invisibility as-is unless explicitly set invisible.
-		// If you want overwrite to become visible, uncomment:
+		// choose your policy:
+		// - keep prior invisibility unless explicitly cleared (current behavior)
+		// - OR force visible on normal LET:
 		// unmarkInvisibleSigil(sigils, name)
 	}
 
 	// Mark EPHEMERAL cleanup
 	if isEphemeral && ephemeral != nil {
 		ephemeral[name] = true
-		// Also scrub invisibility meta for that sigil on cleanup if you ever
-		// unify cleanup later. (Current cleanup deletes only sigils[name].)
-		// We'll address this properly when we wire EPHEMERAL + INVISIBLE fully.
 	}
 
 	// Optional trailing DOT
@@ -1703,7 +1792,7 @@ func execSendBack(prog *Program, tokens []Token, i int, sigils sigilTable) (stri
 	}
 
 	// Special-case: SEND BACK SIGIL name.
-	if i < len(tokens) && (tokens[i].Type == TOK_SIGIL || tokens[i].Type == TOK_SIGIL) {
+	if i < len(tokens) && tokens[i].Type == TOK_SIGIL {
 		i++
 
 		if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
@@ -2360,8 +2449,10 @@ func execOmenBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (int
 
 	// Expect STRING omen name
 	if i >= len(tokens) || tokens[i].Type != TOK_STRING {
-		return i, fmt.Errorf("OMEN: expected OMEN name string after OMEN at %s:%d:%d",
-			startTok.File, startTok.Line, startTok.Column)
+		return i, fmt.Errorf(
+			"OMEN: expected OMEN name string after OMEN at %s:%d:%d",
+			startTok.File, startTok.Line, startTok.Column,
+		)
 	}
 	omenName := tokens[i].Lexeme
 	i++
@@ -2413,7 +2504,7 @@ func execOmenBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (int
 		}
 
 		// Only notice FALLS_TO_RUIN at the top level of *this* OMEN
-		if depth == 1 && t.Type == TOK_IDENT && t.Lexeme == "FALLS_TO_RUIN" {
+		if depth == 1 && t.Type == TOK_IDENT && strings.EqualFold(t.Lexeme, "FALLS_TO_RUIN") {
 			ruinStart = j
 		}
 
@@ -2421,10 +2512,13 @@ func execOmenBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (int
 	}
 
 	if endPos == -1 {
-		return i, fmt.Errorf("OMEN: unmatched ENDOMEN for OMEN at %s:%d:%d",
-			startTok.File, startTok.Line, startTok.Column)
+		return i, fmt.Errorf(
+			"OMEN: unmatched ENDOMEN for OMEN at %s:%d:%d",
+			startTok.File, startTok.Line, startTok.Column,
+		)
 	}
 
+	// The try-body ends at FALLS_TO_RUIN if present, otherwise ENDOMEN.
 	tryEnd := endPos
 	if ruinStart != -1 {
 		tryEnd = ruinStart
@@ -2433,8 +2527,17 @@ func execOmenBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (int
 	// Snapshot sigils BEFORE the OMEN body for rollback.
 	snapshot := cloneSigils(sigils)
 
-	// Run the protected body, catching omenError if raised.
+	// ------------------------------
+	// Option A: mark "inside OMEN try"
+	// ONLY while running the protected body.
+	// ------------------------------
+	if sigils == nil {
+		sigils = make(sigilTable)
+	}
+	sigils[sicOmenTryMetaKey] = "1"
 	raised, err := execBlockWithOmen(prog, tokens[bodyStart:tryEnd], sigils)
+	delete(sigils, sicOmenTryMetaKey)
+
 	if err != nil {
 		return endPos + 1, err
 	}
@@ -2457,7 +2560,7 @@ func execOmenBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (int
 		sigils[k] = v
 	}
 
-	// If there is no FALLS_TO_RUIN block, we just swallow the OMEN.
+	// If there is no FALLS_TO_RUIN block, swallow the OMEN.
 	if ruinStart == -1 {
 		return endPos + 1, nil
 	}
@@ -2471,7 +2574,7 @@ func execOmenBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (int
 		k++
 	}
 
-	// Execute the FALLS_TO_RUIN block (errors here are normal runtime errors).
+	// Execute the FALLS_TO_RUIN block.
 	if err := execBlock(prog, tokens[k:endPos], sigils); err != nil {
 		return endPos + 1, err
 	}
@@ -2825,19 +2928,19 @@ func execWeaveBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 		startTok.File, startTok.Line, startTok.Column)
 }
 
-// ---------------- CHOIR (structured parallel SUMMONs) ----------------
+// ---------------- CHOIR ----------------
 //
 // CHOIR:
-//   SUMMON WORK A WITH SIGIL "one".
-//   SUMMON WORK B WITH SIGIL "two".
+//
+//	SUMMON WORK A WITH SIGIL "x".
+//	SUMMON WORK B WITH SIGIL "y".
+//
 // ENDCHOIR.
 //
-// Semantics v0.1:
-// - Each SUMMON runs in its own goroutine.
-// - Parent waits for all to complete before continuing.
-// - Child sigils are isolated via SUMMON semantics.
-// - Output ordering *between* tasks is not guaranteed.
-
+// Semantics (v0.4):
+// - Each SUMMON runs in parallel, bounded by a worker pool.
+// - Each task receives an isolated sigil environment (clone).
+// - First error is returned after all tasks complete.
 func execChoirBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (int, error) {
 	startTok := tokens[i] // TOK_CHOIR
 	i++                   // after CHOIR
@@ -2856,7 +2959,7 @@ func execChoirBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 	endPos := -1
 	for j := i; j < len(tokens); j++ {
 		t := tokens[j]
-		if t.Type == TOK_ENDCHOIR || (t.Type == TOK_IDENT && t.Lexeme == "ENDCHOIR") {
+		if t.Type == TOK_ENDCHOIR || (t.Type == TOK_IDENT && strings.EqualFold(t.Lexeme, "ENDCHOIR")) {
 			endPos = j
 			break
 		}
@@ -2866,29 +2969,28 @@ func execChoirBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 			startTok.File, startTok.Line, startTok.Column)
 	}
 
-	// Collect starting indices of SUMMON statements inside the CHOIR body.
+	// Collect starting indices of SUMMON statements inside CHOIR body.
 	var starts []int
 	j := i
 	for j < endPos {
 		tok := tokens[j]
+
 		if tok.Type == TOK_NEWLINE {
 			j++
 			continue
 		}
-
 		if tok.Type != TOK_SUMMON {
-			return j, fmt.Errorf("CHOIR: only SUMMON statements are allowed inside CHOIR, got %s at %s:%d:%d",
+			return j, fmt.Errorf("CHOIR: only SUMMON statements are allowed inside CHOIR (got %s) at %s:%d:%d",
 				tok.Type, tok.File, tok.Line, tok.Column)
 		}
 
 		stmtStart := j
 		starts = append(starts, stmtStart)
 
-		// Walk to end of this statement: DOT / NEWLINE / ENDCHOIR / ENDWORK
+		// Walk to end of this statement: DOT / NEWLINE / ENDCHOIR
 		for j < endPos &&
 			tokens[j].Type != TOK_DOT &&
 			tokens[j].Type != TOK_NEWLINE &&
-			tokens[j].Type != TOK_ENDWORK &&
 			tokens[j].Type != TOK_ENDCHOIR {
 			j++
 		}
@@ -2896,12 +2998,13 @@ func execChoirBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 			j++
 		}
 
+		// Skip blank lines
 		for j < endPos && tokens[j].Type == TOK_NEWLINE {
 			j++
 		}
 	}
 
-	// No SUMMONs? Skip CHOIR.
+	// No SUMMONs? Just skip.
 	if len(starts) == 0 {
 		k := endPos + 1
 		if k < len(tokens) && tokens[k].Type == TOK_DOT {
@@ -2910,36 +3013,59 @@ func execChoirBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 		return k, nil
 	}
 
-	// Run summons in parallel, but with isolated sigils per summon.
-	errs := make([]error, len(starts))
+	// Worker pool size:
+	workers := choirWorkerCount(sigils)
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(starts) {
+		workers = len(starts)
+	}
+
+	type job struct{ startIdx int }
+
+	jobs := make(chan job, len(starts))
+	errs := make(chan error, len(starts))
+
 	var wg sync.WaitGroup
-	wg.Add(len(starts))
+	wg.Add(workers)
 
-	for idx, startIdx := range starts {
-		idx := idx
-		startIdx := startIdx
-
+	// Start workers
+	for w := 0; w < workers; w++ {
 		go func() {
 			defer wg.Done()
 
-			// Clone sigils for this summon (prevents races)
-			child := make(sigilTable)
-			for k, v := range sigils {
-				child[k] = v
-			}
+			for jb := range jobs {
+				// IMPORTANT: isolate per task. Clone visible sigils only (if you support invisibility).
+				taskSigils := make(sigilTable)
+				cloneVisibleSigils(taskSigils, sigils)
 
-			// Execute the summon statement using the cloned sigils
-			_, err := execSummonStmt(prog, tokens, startIdx, child)
-			errs[idx] = err
+				_, err := execSummonStmt(prog, tokens, jb.startIdx, taskSigils)
+				if err != nil {
+					errs <- err
+				}
+			}
 		}()
 	}
 
-	wg.Wait()
+	// Enqueue jobs
+	for _, s := range starts {
+		jobs <- job{startIdx: s}
+	}
+	close(jobs)
 
-	// Deterministic error: first in declaration order
-	for _, err := range errs {
+	wg.Wait()
+	close(errs)
+
+	// Bubble first error if any.
+	for err := range errs {
 		if err != nil {
-			return endPos + 1, err
+			// Resume after ENDCHOIR (and optional DOT)
+			k := endPos + 1
+			if k < len(tokens) && tokens[k].Type == TOK_DOT {
+				k++
+			}
+			return k, err
 		}
 	}
 
@@ -2949,6 +3075,22 @@ func execChoirBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 		k++
 	}
 	return k, nil
+}
+
+// choirWorkerCount reads a SIGIL override, else uses runtime default.
+// Suggested: SIGIL CHOIR_WORKERS BE 4.
+func choirWorkerCount(sigils sigilTable) int {
+	raw, ok := sigils["CHOIR_WORKERS"]
+	if !ok || strings.TrimSpace(raw) == "" {
+		// Default: a sane small number for edge devices (phone).
+		// You can later switch to runtime.NumCPU().
+		return 4
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 4
+	}
+	return n
 }
 
 // injectRequestSigils populates SIGILs for the current HTTP request.
@@ -2971,17 +3113,22 @@ func injectRequestSigils(child sigilTable, r *http.Request) {
 		return
 	}
 
-	// Basic fields
 	child["REQUEST_METHOD"] = r.Method
+	markInvisibleSigil(child, "REQUEST_METHOD")
+
 	if r.URL != nil {
 		child["REQUEST_PATH"] = r.URL.Path
 		child["REQUEST_QUERY"] = r.URL.RawQuery
+		markInvisibleSigil(child, "REQUEST_PATH")
+		markInvisibleSigil(child, "REQUEST_QUERY")
 	} else {
 		child["REQUEST_PATH"] = ""
 		child["REQUEST_QUERY"] = ""
+		markInvisibleSigil(child, "REQUEST_PATH")
+		markInvisibleSigil(child, "REQUEST_QUERY")
 	}
 
-	// Query params: Q_<KEY> (first value)
+	// Query params: Q_<KEY>
 	if r.URL != nil {
 		q := r.URL.Query()
 		for key, vals := range q {
@@ -2990,16 +3137,19 @@ func injectRequestSigils(child sigilTable, r *http.Request) {
 			}
 			sigilName := "Q_" + strings.ToUpper(key)
 			child[sigilName] = vals[0]
+			// Query params can be considered "non-secret", but marking invisible is safer by default.
+			markInvisibleSigil(child, sigilName)
 		}
 	}
 
-	// Body (best-effort): set REQUEST_BODY and rewind so others can still read it
 	child["REQUEST_BODY"] = ""
+	markInvisibleSigil(child, "REQUEST_BODY")
+
 	if r.Body != nil {
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err == nil {
 			child["REQUEST_BODY"] = string(bodyBytes)
-			r.Body = io.NopCloser(bytes.NewReader(bodyBytes)) // rewind
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
 	}
 }

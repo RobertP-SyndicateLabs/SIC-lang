@@ -1,0 +1,32 @@
+LANGUAGE "SIC 1.0".
+SCROLL choir_invisibility_demo
+MODE CHANT.
+
+WORK CHILD WITH SIGIL UNUSED AS TEXT:
+    SAY: "CHOIR CHILD trying SECRET (should be blocked).".
+
+    OMEN "missing":
+        SAY: SECRET.
+        SAY: "BAD: SECRET was visible (should not happen).".
+    FALLS_TO_RUIN:
+        SAY: "SECRET is not visible to CHOIR CHILD (correct).".
+    ENDOMEN.
+
+    SEND BACK "OK".
+ENDWORK.
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+    SAY: "Setting invisible SECRET in parent.".
+    INVISIBLE SIGIL SECRET BE "doom".
+
+    SAY: "Starting CHOIR; tasks must not inherit invisible sigils.".
+    CHOIR:
+        SUMMON WORK CHILD.
+        SUMMON WORK CHILD.
+    ENDCHOIR.
+
+    SAY: "After CHOIR, parent still holds SECRET internally (redacted output expected):".
+    SAY: SECRET.
+
+    SAY: "End.".
+ENDWORK.
