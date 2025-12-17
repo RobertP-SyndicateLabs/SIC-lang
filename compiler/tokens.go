@@ -88,6 +88,9 @@ const (
 	TOK_SUMMON    TokenType = "SUMMON"
 	TOK_YIELDS    TokenType = "YIELDS" // for SUMMON WORK X YIELDS ...
 
+        // INVISIBLE
+        TOK_INVISIBLE  TokenType = "INVISIBLE"
+
 	// Misc placeholders – keep around for expansion
 	TOK_WORKWORD TokenType = "WORKWORD"
 

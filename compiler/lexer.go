@@ -404,4 +404,6 @@ var keywords = map[string]TokenType{
 	"SLEEP":    TOK_SLEEP,
 	"FOR":      TOK_FOR,
 	"SECONDS":  TOK_SECONDS,
+
+        "INVISIBLE":  TOK_INVISIBLE,
 }
