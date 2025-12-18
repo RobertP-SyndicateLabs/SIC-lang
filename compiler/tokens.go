@@ -8,6 +8,8 @@ const (
 	TOK_EOF     TokenType = "EOF"
 	TOK_NEWLINE TokenType = "NEWLINE"
 	TOK_DOT     TokenType = "."
+	TOK_SEAL    TokenType = "SEAL"
+	TOK_SEALED  TokenType = "SEALED"
 
 	// Identifiers & literals
 	TOK_IDENT  TokenType = "IDENT"
@@ -88,8 +90,8 @@ const (
 	TOK_SUMMON    TokenType = "SUMMON"
 	TOK_YIELDS    TokenType = "YIELDS" // for SUMMON WORK X YIELDS ...
 
-        // INVISIBLE
-        TOK_INVISIBLE  TokenType = "INVISIBLE"
+	// INVISIBLE
+	TOK_INVISIBLE TokenType = "INVISIBLE"
 
 	// Misc placeholders – keep around for expansion
 	TOK_WORKWORD TokenType = "WORKWORD"
@@ -103,7 +105,7 @@ const (
 	TOK_LBRACE TokenType = "LBRACE" // {
 	TOK_RBRACE TokenType = "RBRACE" // }
 	TOK_EQUAL  TokenType = "EQUAL"  // =
-        TOK_DOLLAR TokenType = "DOLLAR" // $
+	TOK_DOLLAR TokenType = "DOLLAR" // $
 
 	TOK_PLUS    TokenType = "PLUS"    // +
 	TOK_MINUS   TokenType = "MINUS"   // -
