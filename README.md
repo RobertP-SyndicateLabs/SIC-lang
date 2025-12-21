@@ -3,107 +3,85 @@ SIC-lang — The Ritual Orchestration Language
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![CI](https://github.com/RobertP-SyndicateLabs/SIC-lang/actions/workflows/ci.yml/badge.svg)](https://github.com/RobertP-SyndicateLabs/SIC-lang/actions)
 
-v0.3 — Expression Canticle
+**Version:** v0.4.0  
+**License:** Apache 2.0  
+**Status:** Active Development  
 
 A language of intention, discipline, and deterministic orchestration.
 
 
+## What is SIC?
 
+**SIC** is a human-readable orchestration language designed to unify how humans — and AI systems — express:
 
-What is SIC?
-
-SIC is a human-readable orchestration language designed to unify how humans—and AI systems—express:
-
-behavior
-
-state
-
-parallel execution
-
-error handling
-
-service interactions
-
-structured workflows
-
+- behavior
+- state
+- parallel execution
+- error handling
+- service interactions
+- structured workflows
 
 SIC is not “just another syntax.”
-It is a ceremonial programming model that treats computation as intention, action, and consequence.
 
-It reads like a scroll.
-It executes like a workflow engine.
+It is a **ceremonial programming model** that treats computation as **intention, action, and consequence**.
+
+It reads like a scroll.  
+It executes like a workflow engine.  
 It behaves like a disciplined runtime.
 
-SIC is built on four pillars:
 
-1. Intention — explicit behavior via WORKS
+## The Four Pillars of SIC
 
+SIC is built on four foundational principles:
 
-2. Responsibility — deterministic failure, recovery, scoping
+### 🜁 Intention  
+Explicit behavior via **WORKs** — nothing implicit, nothing hidden.
 
+### 🜂 Responsibility  
+Deterministic failure, recovery, and scoping.  
+Failure is named. Recovery is structured.
 
-3. Orchestration — parallel, sequential, distributed execution
+### 🜃 Orchestration  
+Sequential, parallel, and service-level execution as first-class language concepts.
 
-
-4. Clarity — no hidden state, no ambiguity, no magic
-
-
-
-SIC is currently implemented in its CHANT dialect:
-a structured execution language with strict semantics and human-legible control flow.
-
-
+### 🜄 Clarity  
+No hidden state. No magic propagation. No ambiguous side effects.
 
 
-Why SIC Exists
+## Why SIC Exists
 
-Modern development fragments intent across:
+Modern systems fragment intent across:
 
-Bash scripts
+- Bash scripts
+- Python automations
+- YAML pipelines
+- Kubernetes manifests
+- Workflow engines
+- HTTP services
+- configuration files
+- state machines
 
-Python automations
+This leads to brittle systems and unclear behavior.
 
-YAML pipelines
-
-Kubernetes operators
-
-Workflow engines
-
-HTTP services
-
-configuration files
-
-state machines
-
-
-This leads to brittle systems, unclear behavior, and human error.
-
-SIC unifies all of it.
+**SIC unifies all of it.**
 
 SIC provides a single, explicit, deterministic language for expressing:
 
-workflows
+- workflows
+- automation
+- distributed service calls
+- stateful systems
+- orchestration logic
+- parallel tasks
+- failure behavior
+- HTTP endpoint routing
 
-automation
+No YAML → Go → Bash → Python → JSON → Terraform → back to YAML.
 
-distributed service calls
-
-stateful systems
-
-orchestration logic
-
-parallel tasks
-
-error behavior
-
-endpoint routing
+Just **SIC**.
 
 
-No more YAML → Go → Bash → Python → JSON → Terraform → back to YAML.
-
-Just SIC.
-
-Who SIC Is For
+## Who SIC Is For
 
 SIC is designed for:
 
@@ -114,158 +92,138 @@ SIC is designed for:
 - AI systems that must express intent safely and explicitly
 
 
-Key SIC Concepts
+## Core Concepts
 
-WORK — Units of intention
+### WORK — Units of Intention
 
+```sic
 WORK GREET WITH SIGIL name AS TEXT:
     SAY: "Hello, " + name + ".".
 ENDWORK.
 
-SIGIL — Named state
+
+
+SIGIL — Named State
 
 SIGIL mood BE "joyful".
 
-EPHEMERAL SIGIL — Auto-scrubbed scoped state
 
-EPHEMERAL SIGIL temp BE "secret".
 
-SUMMON — Call a WORK with bound state
+EPHEMERAL SIGIL — Auto-Scrubbed Scoped State
 
-SUMMON GREET WITH name AS "Ada".
+EPHEMERAL SIGIL secret BE "hidden".
 
-SEND BACK — Returning values from a WORK
+Automatically removed on all exit paths (normal or failure).
+
+
+
+INVISIBLE SIGIL — Non-Propagating State
+
+Invisible sigils do not propagate to:
+
+SUMMONed WORKs
+
+CHOIR tasks
+
+
+Unless explicitly passed.
+
+This is how secrets stay secret.
+
+
+
+SUMMON — Call a WORK
+
+SUMMON WORK GREET WITH name AS "Ada".
+
+SUMMON can also be used as an expression.
+
+
+
+SEND BACK — Return Values
 
 SEND BACK "Done.".
 
-IF / WHILE — Deterministic control flow
+
+
+IF / WHILE — Deterministic Control Flow
 
 WHILE count < 3:
     SAY: count.
     LET count BE count + 1.
 ENDWHILE.
 
-OMEN / FALLS_TO_RUIN — Structured failure handling
+
+
+OMEN / FALLS_TO_RUIN — Structured Failure Handling
 
 OMEN "network_down":
     RAISE OMEN "network_down".
 FALLS_TO_RUIN:
-    SAY: "Recovered.".
+    SAY: "Recovered gracefully.".
 ENDOMEN.
 
-WEAVE / CHOIR — Sequential or parallel orchestration
 
-WEAVE:
-    SING TASK_A.
-    SING TASK_B.
-ENDWEAVE.
 
-CHAMBER / ENTANGLE / RELEASE — Scoped ownership discipline
+WEAVE / CHOIR — Orchestration
 
-Think “Rust-like borrow checking,” but ritualistic.
+WEAVE: sequential orchestration
 
-ALTAR — HTTP service endpoints
-
-ALTAR AT :8080:
-    ROUTE GET "/hello" TO WORK HELLO.
-ENDALTAR.
-
-(Full SEND BACK → HTTP response integration arriving in v0.4)
+CHOIR: multi-task orchestration (v0.4.0 runs sequentially; parallel execution planned)
 
 
 
 
-Current Status — v0.3 Expression Canticle
+CHAMBER / ENTANGLE / RELEASE — Ownership Discipline
 
-✔ Fully implemented:
+Scoped state ownership with runtime enforcement.
 
-Parser + lexer + runtime
-
-WORK execution model
-
-SIGIL state system
-
-LET mutation
-
-EPHEMERAL sigils with auto-clean
-
-IF / WHILE
-
-SUMMON
-
-SEND BACK return semantics
-
-OMEN / FALLS / FALLS_TO_RUIN
-
-WEAVE orchestration
-
-CHOIR (sequential baseline)
-
-CHAMBER scoping
-
-ENTANGLE / RELEASE (ownership discipline)
-
-Expression engine with:
-
-arithmetic
-
-boolean logic
-
-comparisons
-
-nested expressions
-
-SUMMON as expression
-
-
-ALTAR: HTTP server with routing (v0.3)
-
-17 example scrolls demonstrating the system
-
-
-In progress:
-
-ALTAR → HTTP-response SEND BACK support
-
-CHOIR worker pool (true parallel execution)
-
-Richer diagnostics
-
-Typed sigils visualizer
-
-
-Coming soon (v0.4+):
-
-Remote SUMMON (cross-process workflows)
-
-Persistent CHAMBERs (stateful storage)
-
-Scheduler: EVERY N SECONDS:
-
-SIC_D dialect (general-purpose canonical layer)
-
-SIC_VM (bytecode execution engine)
-
-Cluster orchestration model
-
-SIC → Go/Python transpiler
+Think Rust-like borrow discipline, but ritualized.
 
 
 
-Example: ALTAR service (live HTTP endpoint)
+SEALED WORK (v0.4.0)
+
+A SEALED WORK requires a matching SEAL token to execute.
+
+WORK SEALED VAULT SEAL "vault_key":
+    SEND BACK "TREASURE".
+ENDWORK.
+
+Invocation:
+
+SUMMON WORK VAULT SEAL "vault_key".
+
+Without the correct seal, execution raises:
+
+OMEN "sealed_work"
+
+
+
+ALTAR — HTTP Services
+
+ALTAR raises an HTTP server and binds routes to WORKs or inline responses.
+
+Canonical Route Syntax
+
+Unquoted paths are canonical:
+
+ROUTE GET /hello TO SEND BACK "Hello".
+
+
+
+Example: ALTAR Service
 
 LANGUAGE "SIC 1.0".
 SCROLL altar_demo
 MODE CHANT.
 
-WORK HELLO WITH SIGIL UNUSED AS TEXT:
-    SEND BACK "Hello from SIC!".
-ENDWORK.
-
 WORK MAIN WITH SIGIL UNUSED AS TEXT:
     SAY: "Raising ALTAR.".
+
     ALTAR AT :15080:
-        ROUTE GET "/hello" TO WORK HELLO.
+        ROUTE GET /hello TO SEND BACK "Hello from SIC!".
+        ROUTE GET /secure TO SEND BACK "Secure route active".
     ENDALTAR.
 
     SAY: "ALTAR active.".
@@ -278,7 +236,7 @@ ENDWORK.
 
 Run:
 
-go build -o sic ./cli
+CGO_ENABLED=0 go build -o sic ./cli
 ./sic run examples/altar_demo.sic
 
 Then:
@@ -287,17 +245,116 @@ curl http://localhost:15080/hello
 
 
 
+SEALED ALTAR (v0.4.0)
+
+An ALTAR can be sealed on first bind.
+
+Once sealed, all future modifications require the correct seal
+
+Attempts without the seal or with the wrong seal raise:
+
+
+OMEN "sealed_altar"
+
+SEAL is only allowed in the ALTAR header, never in the body.
+
+Negative tests enforce this strictly.
+
+
+
+Current Status — v0.4.0
+
+✔ Fully Implemented
+
+Lexer, parser, runtime
+
+WORK execution model
+
+SIGIL state system
+
+LET mutation
+
+EPHEMERAL sigils (auto-scrubbed)
+
+INVISIBLE sigils
+
+IF / WHILE
+
+SUMMON (statement + expression)
+
+SEND BACK semantics
+
+OMEN / FALLS / FALLS_TO_RUIN
+
+WEAVE orchestration
+
+CHOIR (sequential baseline)
+
+CHAMBER scoping
+
+ENTANGLE / RELEASE enforcement
+
+Expression engine:
+
+arithmetic
+
+boolean logic
+
+comparisons
+
+nested expressions
+
+
+ALTAR HTTP server
+
+ALTAR inline SEND BACK → HTTP response
+
+SEALED WORK
+
+SEALED ALTAR
+
+Positive + negative example suite
+
+
+In Progress
+
+CHOIR worker pool (true parallelism)
+
+Richer diagnostics
+
+Typed sigil visualization
+
+
+Coming in v0.5+
+
+Remote SUMMON (cross-process workflows)
+
+Persistent CHAMBERs
+
+Scheduler primitives (EVERY N SECONDS:)
+
+SIC_D dialect (canonical IR layer)
+
+SIC_VM (bytecode engine)
+
+Cluster orchestration model
+
+SIC → Go / Python transpilers
+
+
+
+
 Repository Structure
 
 SIC-lang/
-├── cli/               # CLI entry point
+├── cli/              # CLI entry point
 ├── compiler/
-│   ├── lexer.go       # tokenization
-│   ├── parser.go      # AST + WorkDecl builder
-│   ├── runtime.go     # execution engine
+│   ├── lexer.go
+│   ├── parser.go
+│   ├── runtime.go
 │   └── tokens.go
-├── examples/          # full working SIC scrolls
-├── scrolls/           # design scrolls & philosophy
+├── examples/         # Fully working SIC scrolls (incl. negative tests)
+├── scrolls/          # Design scrolls & philosophy
 ├── go.mod
 ├── LICENSE
 └── README.md
@@ -306,11 +363,11 @@ SIC-lang/
 
 Building & Running
 
-Build:
+Build
 
-go build -o sic ./cli
+CGO_ENABLED=0 go build -o sic ./cli
 
-Run a SIC scroll:
+Run a Scroll
 
 ./sic run examples/hello_plus.sic
 
@@ -320,10 +377,16 @@ Philosophy
 
 SIC is a language of responsibility.
 
-Where most languages obscure intention with syntax, mutation, and ambiguity, SIC makes intention explicit.
-It treats behavior as ceremony.
-It treats state as something to be honored.
-It treats failure as something to be handled with dignity.
+Where most languages obscure intent with syntax, mutation, and ambiguity, SIC makes intention explicit.
+
+It treats:
+
+behavior as ceremony
+
+state as something to be honored
+
+failure as something to be handled with dignity
+
 
 Its aesthetic is ritual.
 Its purpose is clarity.
@@ -334,36 +397,36 @@ Its goal is to unify how humans command machines.
 Contributing
 
 SIC is under active development.
+
 Feedback, issues, and scroll contributions are welcome.
 
-Code contributions will open formally once:
+Formal code contributions will open once:
 
-SIC_D dialect structure stabilizes
+SIC_D stabilizes
 
-The analyzer subsystem begins
+the analyzer subsystem begins
 
-ALTAR completes its full service semantics
+ALTAR completes its extended service semantics
 
 
-Meanwhile, please:
+Until then:
 
 Open issues
 
 Propose features
 
-Discuss SIC’s growth
+Discuss SIC’s evolution
 
-Sponsor development
 
 
 
 Supporting SIC
 
-If you value the mission and want SIC to reach its full potential:
+If you believe in SIC’s mission and want to accelerate its growth:
 
 https://github.com/sponsors/RobertP-SyndicateLabs
 
-Your support accelerates:
+Your support advances:
 
 the SIC virtual machine
 
@@ -379,11 +442,9 @@ documentation and onboarding
 
 
 
-
-
 License
 
-Apache 2.0 — allowing open experimentation, commercial adoption, and research use.
+Apache 2.0 — open for experimentation, research, and commercial use.
 
 
 
@@ -399,6 +460,6 @@ SIC will orchestrate your systems.
 
 ## Language Semantics
 
-The official runtime semantics for SIC v0.3 are defined here:
+The official runtime semantics for SIC v0.4 are defined here:
 
-📜 [SIC v0.3 Runtime Semantics](docs/semantics/v0.3-runtime-semantics.md)
+📜 [SIC v0.4 Runtime Semantics](docs/semantics/v0.4-runtime-semantics.md)
