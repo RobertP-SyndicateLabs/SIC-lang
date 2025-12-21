@@ -1,0 +1,49 @@
+LANGUAGE "SIC 1.0".
+SCROLL sealed_altar_demo
+MODE CHANT.
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+    SAY: "Sealing ALTAR on first bind (should succeed).".
+
+    OMEN "sealed_altar":
+        ALTAR AT :15081 SEAL "altar_key":
+            ROUTE GET /hello TO SEND BACK "hello from sealed altar".
+        ENDALTAR.
+    FALLS_TO_RUIN:
+        SAY: "❌ BAD: ALTAR failed to seal on first bind.".
+    ENDOMEN.
+
+    SAY: "Attempting to add route WITHOUT seal (should fail).".
+
+    OMEN "sealed_altar":
+        ALTAR AT :15081:
+            ROUTE GET /bad TO SEND BACK "this should not work".
+        ENDALTAR.
+        SAY: "❌ BAD: Route added without seal.".
+    FALLS_TO_RUIN:
+        SAY: "✅ Correct: unsealed modification blocked.".
+    ENDOMEN.
+
+    SAY: "Attempting to add route with WRONG seal (should fail).".
+
+    OMEN "sealed_altar":
+        ALTAR AT :15081 SEAL "wrong_key":
+            ROUTE GET /bad2 TO SEND BACK "this should not work".
+        ENDALTAR.
+        SAY: "❌ BAD: Route added with wrong seal.".
+    FALLS_TO_RUIN:
+        SAY: "✅ Correct: wrong seal blocked.".
+    ENDOMEN.
+
+    SAY: "Attempting to add route with CORRECT seal (should succeed).".
+
+    OMEN "sealed_altar":
+        ALTAR AT :15081 SEAL "altar_key":
+            ROUTE GET /secure TO SEND BACK "secure route active".
+        ENDALTAR.
+    FALLS_TO_RUIN:
+        SAY: "❌ BAD: correct seal still blocked.".
+    ENDOMEN.
+
+    SAY: "✅ sealed ALTAR demo complete.".
+ENDWORK.

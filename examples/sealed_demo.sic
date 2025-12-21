@@ -1,0 +1,42 @@
+LANGUAGE "SIC 1.0".
+SCROLL sealed_demo
+MODE CHANT.
+
+WORK SEALED VAULT WITH SIGIL UNUSED AS TEXT SEAL "vault_key":
+    SAY: "VAULT opened.".
+    SEND BACK "TREASURE".
+ENDWORK.
+
+WORK CHILD WITH SIGIL UNUSED AS TEXT:
+    SAY: "CHILD entering.".
+    SEND BACK "OK".
+ENDWORK.
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+    SAY: "Trying VAULT without seal (should fail).".
+
+    OMEN "sealed_work":
+        SUMMON WORK VAULT.
+        SAY: "❌ BAD: VAULT ran without seal.".
+    FALLS_TO_RUIN:
+        SAY: "✅ Correct: sealed_work blocked VAULT.".
+    ENDOMEN.
+
+    SAY: "Trying VAULT with wrong seal (should fail).".
+    OMEN "sealed_work":
+        SUMMON WORK VAULT SEAL "wrong_key".
+        SAY: "❌ BAD: VAULT ran with wrong seal.".
+    FALLS_TO_RUIN:
+        SAY: "✅ Correct: wrong seal blocked VAULT.".
+    ENDOMEN.
+
+    SAY: "Trying VAULT with correct seal (should succeed).".
+    OMEN "sealed_work":
+        SUMMON WORK VAULT SEAL "vault_key".
+    FALLS_TO_RUIN:
+        SAY: "❌ BAD: even correct seal blocked VAULT.".
+    ENDOMEN.
+
+    SAY: "✅ Correct: VAULT opened with correct seal.".
+    SAY: "✅ End.".
+ENDWORK.

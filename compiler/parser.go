@@ -1,6 +1,9 @@
 package compiler
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ===== AST TYPES =====
 
@@ -27,7 +30,9 @@ type WorkDecl struct {
 	Start       Token
 	Body        []Token
 	SigilParams []string // names of SIGIL parameters in header, in order
-        Ephemeral   bool // true if declared as WORK EPHEMERAL
+	Ephemeral   bool     // true if declared as WORK EPHEMERAL
+	Sealed      bool
+	SealToken   string
 }
 
 // ===== PARSER CORE =====
@@ -195,13 +200,22 @@ func (p *Parser) parseWork() *WorkDecl {
 	// Move to the token after WORK.
 	p.nextToken()
 
-	// Optional EPHEMERAL marker:
-	//   WORK EPHEMERAL MAIN WITH SIGIL ...
-	// vs
-	//   WORK MAIN WITH SIGIL ...
-	if p.curToken.Type == TOK_EPHEMERAL {
-		w.Ephemeral = true
-		p.nextToken()
+	// Optional modifiers in any order:
+	//   WORK [EPHEMERAL] [SEALED] Name ...
+	//   WORK [SEALED] [EPHEMERAL] Name ...
+	for {
+		switch p.curToken.Type {
+		case TOK_EPHEMERAL:
+			w.Ephemeral = true
+			p.nextToken()
+			continue
+
+		case TOK_SEALED:
+			w.Sealed = true
+			p.nextToken()
+			continue
+		}
+		break
 	}
 
 	// Expect the work name.
@@ -211,13 +225,14 @@ func (p *Parser) parseWork() *WorkDecl {
 	}
 	w.Name = p.curToken.Lexeme
 
-	// Scan the header until COLON, capturing "SIGIL <ident>" pairs.
+	// Scan header until COLON, capturing:
+	// - SIGIL params
+	// - optional SEAL <token>
 	for {
 		p.nextToken()
 
 		switch p.curToken.Type {
 		case TOK_COLON:
-			// end of header
 			goto bodyStart
 
 		case TOK_EOF:
@@ -231,19 +246,35 @@ func (p *Parser) parseWork() *WorkDecl {
 		case TOK_SIGIL:
 			p.nextToken()
 			if !isSigilNameToken(p.curToken) {
-				p.addError("expected SIGIL name after SIGIL in WORK %s, got %s",
+				p.addError("expected SIGIL name after SIGIL in WORK header for %s, got %s",
 					w.Name, p.curToken.Type)
 				return nil
 			}
 			w.SigilParams = append(w.SigilParams, p.curToken.Lexeme)
 
+		case TOK_SEAL:
+			// Header seal token: SEAL "vault_key"  or  SEAL someIdent
+			p.nextToken()
+			if !isSigilNameToken(p.curToken) {
+				p.addError("expected SEAL token after SEAL in WORK header for %s, got %s",
+					w.Name, p.curToken.Type)
+				return nil
+			}
+			w.SealToken = p.curToken.Lexeme
+
 		default:
-			// Ignore other header tokens (WITH, AS, TEXT, etc.) for now.
+			// Ignore other header tokens (WITH, AS, TEXT, etc.)
 		}
 	}
 
 bodyStart:
-	// We're currently *at* the COLON. Move to first body token.
+	// If declared SEALED, require SEAL token in header
+	if w.Sealed && strings.TrimSpace(w.SealToken) == "" {
+		p.addError("WORK %s declared SEALED but no SEAL token provided in header", w.Name)
+		return nil
+	}
+
+	// Move to first body token.
 	p.nextToken()
 
 	// Collect body tokens until ENDWORK or EOF.
@@ -252,6 +283,5 @@ bodyStart:
 		p.nextToken()
 	}
 
-	// ParseProgram's main loop will see TOK_ENDWORK and advance beyond it.
 	return w
 }

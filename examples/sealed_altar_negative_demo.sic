@@ -1,0 +1,20 @@
+LANGUAGE "SIC 1.0".
+SCROLL sealed_altar_negative_demo
+MODE CHANT.
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+    SAY: "Negative test: SEAL inside ALTAR body must fail loudly.".
+
+    OMEN "altar_seal_in_body":
+        ALTAR AT :15082 SEAL "altar_key":
+            ROUTE GET /x TO SEND BACK "nope".
+            SEAL "oops_should_not_be_here".
+        ENDALTAR.
+
+        SAY: "❌ BAD: ALTAR accepted SEAL inside body.".
+    FALLS_TO_RUIN:
+        SAY: "✅ Correct: runtime rejected SEAL inside body.".
+    ENDOMEN.
+
+    SAY: "End.".
+ENDWORK.

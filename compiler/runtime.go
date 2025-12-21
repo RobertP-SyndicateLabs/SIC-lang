@@ -15,12 +15,12 @@ import (
 // ---- ALTAR runtime ----
 
 type altarServer struct {
-	addr    string
-	mux     *http.ServeMux
-	started bool
-
-	// routeKey = method + " " + path
+	addr       string
+	mux        *http.ServeMux
 	registered map[string]bool
+	started    bool
+
+	seal string // if non-empty, ALTAR is sealed and requires matching SEAL to modify
 }
 
 var (
@@ -111,6 +111,27 @@ func cloneVisibleSigils(dst, src sigilTable) {
 		}
 		dst[k] = v
 	}
+}
+
+const sicOmenSealedWork = "sealed_work"
+
+const sicSealPrefix = "__SIC_SEAL__"
+
+func sealSigilName(workName string) string {
+	// Work name is already case-stable in your parser; keep it exact.
+	return sicSealPrefix + workName
+}
+
+func hasValidSeal(sigils sigilTable, w *WorkDecl) bool {
+	if sigils == nil || w == nil || !w.Sealed {
+		return true // not sealed => always allowed
+	}
+	want := strings.TrimSpace(w.SealToken)
+	if want == "" {
+		return false
+	}
+	got, _ := getSigil(sigils, sealSigilName(w.Name))
+	return got == want
 }
 
 const sicRedacted = "[REDACTED]"
@@ -989,6 +1010,11 @@ func classifySigilValue(val string) exprValue {
 func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool) (string, error) {
 	tokens := cleanWorkBody(w.Body)
 	i := 0
+
+	// Enforce SEALED WORK capability
+	if w.Sealed && !hasValidSeal(sigils, w) {
+		return "", &omenError{name: "sealed_work"}
+	}
 
 	if w.Ephemeral {
 		fmt.Printf("[SIC] Entering EPHEMERAL WORK %s.\n", w.Name)
@@ -3233,10 +3259,32 @@ func pickResponseBody(defaultBody string, sigils sigilTable) string {
 // v1 semantics:
 // - Start (or reuse) an HTTP server at given addr.
 // - Register each ROUTE inside this ALTAR block.
-// - Then block the main goroutine so the server stays alive.
+// execAltarBlock executes an ALTAR block.
+//
+// Supported header forms (all equivalent):
+//
+//	ALTAR AT :15081 SEAL "altar_key":
+//	ALTAR AT :15081 SEALED SEAL "altar_key":
+//	ALTAR AT :15081:
+//	    SEAL "altar_key"
+//	    ROUTE ...
+//	ALTAR AT :15081:
+//	    SEALED SEAL "altar_key"
+//	    ROUTE ...
+//
+// Rules:
+//   - SEAL/SEALED are header-only. If seen in the body, fail loudly.
+//   - First bind may set a seal (if provided). Subsequent ALTAR blocks must
+//     present matching SEAL to modify routes once sealed.
 func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (int, error) {
 	startTok := tokens[i] // TOK_ALTAR
 	i++
+
+	skipNewlines := func() {
+		for i < len(tokens) && tokens[i].Type == TOK_NEWLINE {
+			i++
+		}
+	}
 
 	// Expect: AT
 	if i >= len(tokens) || tokens[i].Type != TOK_AT {
@@ -3255,12 +3303,10 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 
 	switch tok.Type {
 	case TOK_STRING:
-		// e.g. ":15080" or "localhost:15080"
 		addr = tok.Lexeme
 		i++
 
 	case TOK_COLON:
-		// :15080
 		if i+1 >= len(tokens) || tokens[i+1].Type != TOK_NUM {
 			return i, fmt.Errorf("ALTAR: expected numeric port after ':' at %s:%d:%d",
 				tok.File, tok.Line, tok.Column)
@@ -3269,7 +3315,6 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 		i += 2
 
 	case TOK_NUM:
-		// bare 15080 → ":15080"
 		addr = ":" + tok.Lexeme
 		i++
 
@@ -3278,56 +3323,198 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 			tok.Type, tok.File, tok.Line, tok.Column)
 	}
 
-	// Optional colon after address: ALTAR AT :15080:
+	// ------------------------------------------------------------
+	// Parse SEAL/SEALED in TWO possible places:
+	//   (A) Inline header: ALTAR AT :15081 SEAL "k":
+	//   (B) Prelude lines: ALTAR AT :15081:
+	//          SEAL "k".
+	//          ROUTE ...
+	//
+	// We collect header modifiers until we reach ROUTE/ENDALTAR.
+	// ------------------------------------------------------------
+
+	sealVal := ""
+	hasSeal := false
+	declaredSealed := false
+
+	parseSealValue := func() error {
+		// assumes current token is SEAL or IDENT "SEAL"
+		i++ // consume SEAL
+		hasSeal = true
+
+		skipNewlines()
+
+		if i >= len(tokens) {
+			return fmt.Errorf("ALTAR: missing SEAL value at %s:%d:%d",
+				tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
+		}
+
+		switch tokens[i].Type {
+		case TOK_STRING:
+			sealVal = tokens[i].Lexeme
+			i++
+
+		case TOK_IDENT:
+			// treat IDENT as sigil lookup
+			sealVal, _ = getSigil(sigils, tokens[i].Lexeme)
+			i++
+
+		case TOK_SIGIL:
+			i++
+			if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
+				return fmt.Errorf("ALTAR: expected SIGIL name after SEAL SIGIL at %s:%d:%d",
+					tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
+			}
+			sealVal, _ = getSigil(sigils, tokens[i].Lexeme)
+			i++
+
+		default:
+			return fmt.Errorf("ALTAR: invalid SEAL value token %s at %s:%d:%d",
+				tokens[i].Type, tokens[i].File, tokens[i].Line, tokens[i].Column)
+		}
+
+		// optional ":" or "." after seal line/value (be forgiving)
+		skipNewlines()
+		if i < len(tokens) && (tokens[i].Type == TOK_COLON || tokens[i].Type == TOK_DOT) {
+			i++
+		}
+
+		return nil
+	}
+
+	// Optional inline header modifiers (before the first header colon)
+	skipNewlines()
+
+	// inline: optional SEALED
+	if i < len(tokens) && tokens[i].Type == TOK_SEALED {
+		declaredSealed = true
+		i++
+		skipNewlines()
+	}
+
+	// inline: optional SEAL ...
+	if i < len(tokens) && (tokens[i].Type == TOK_SEAL ||
+		(tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "SEAL"))) {
+		if err := parseSealValue(); err != nil {
+			return i, err
+		}
+	}
+
+	// Optional colon that begins the ALTAR block header/body
+	skipNewlines()
 	if i < len(tokens) && tokens[i].Type == TOK_COLON {
 		i++
+	}
+
+	// Prelude header lines INSIDE the block, before first ROUTE/ENDALTAR:
+	//   SEALED
+	//   SEAL "x"
+	// are allowed here.
+	for {
+		skipNewlines()
+		if i >= len(tokens) {
+			break
+		}
+
+		// stop when body begins for real
+		if tokens[i].Type == TOK_ROUTE || tokens[i].Type == TOK_ENDALTAR {
+			break
+		}
+
+		// SEALED line
+		if tokens[i].Type == TOK_SEALED || (tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "SEALED")) {
+			declaredSealed = true
+			i++
+			// optional ":" or "." after SEALED line
+			skipNewlines()
+			if i < len(tokens) && (tokens[i].Type == TOK_COLON || tokens[i].Type == TOK_DOT) {
+				i++
+			}
+			continue
+		}
+
+		// SEAL line
+		if tokens[i].Type == TOK_SEAL || (tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "SEAL")) {
+			if err := parseSealValue(); err != nil {
+				return i, err
+			}
+			continue
+		}
+
+		// If it's neither ROUTE/ENDALTAR nor a header modifier, that's a hard error.
+		return i, fmt.Errorf("ALTAR: expected SEALED, SEAL, ROUTE, or ENDALTAR, got %s at %s:%d:%d",
+			tokens[i].Type, tokens[i].File, tokens[i].Line, tokens[i].Column)
+	}
+	// If they wrote SEALED but forgot SEAL
+	if declaredSealed && !hasSeal {
+		return i, fmt.Errorf("ALTAR: SEALED requires SEAL <value> at %s:%d:%d",
+			startTok.File, startTok.Line, startTok.Column)
 	}
 
 	fmt.Printf("[SIC ALTAR] ALTAR awakening at %s.\n", addr)
 
 	// ---------- init / start server (singleton) ----------
 	altarMu.Lock()
+
 	if globalAltar == nil {
 		globalAltar = &altarServer{
 			addr:       addr,
 			mux:        http.NewServeMux(),
 			registered: make(map[string]bool),
+			seal:       "",
+		}
+		// First bind can seal the altar if a seal is provided
+		if hasSeal && strings.TrimSpace(sealVal) != "" {
+			globalAltar.seal = sealVal
 		}
 	} else if globalAltar.addr != addr {
 		prev := globalAltar.addr
 		altarMu.Unlock()
-		return i, fmt.Errorf("ALTAR: server already bound to %s, cannot bind to %s", prev, addr)
+		return i, fmt.Errorf("ALTAR: server already bound to %s, cannot rebind to %s", prev, addr)
 	}
 
 	srv := globalAltar
+
+	// Enforce sealed altar: once sealed, any modification requires matching SEAL
+	if srv.seal != "" {
+		if !hasSeal || sealVal != srv.seal {
+			altarMu.Unlock()
+			return i, &omenError{name: "sealed_altar"}
+		}
+	}
+
+	// Start HTTP server once
 	if !srv.started {
 		srv.started = true
 		go func(s *altarServer) {
-			fmt.Fprintf(os.Stderr, "[SIC ALTAR] HTTP server listening on %s.\n", s.addr)
+			fmt.Fprintf(os.Stderr, "[SIC ALTAR] HTTP server listening on %s\n", s.addr)
 			if err := http.ListenAndServe(s.addr, s.mux); err != nil {
 				fmt.Fprintf(os.Stderr, "[SIC ALTAR] server error: %v\n", err)
 			}
 		}(srv)
 	}
+
 	altarMu.Unlock()
 
 	// ---------- parse ROUTE statements ----------
 	for i < len(tokens) {
 		tok := tokens[i]
 
-		// Skip blank lines
 		if tok.Type == TOK_NEWLINE {
 			i++
 			continue
 		}
 
-		// ENDALTAR.
+		// If someone tries to put SEAL/SEALED after routes begin, fail loudly.
+		if tok.Type == TOK_SEAL || (tok.Type == TOK_IDENT && strings.EqualFold(tok.Lexeme, "SEAL")) {
+			return i, &omenError{name: "altar_seal_in_body"}
+		}
+
 		if tok.Type == TOK_ENDALTAR {
 			i++
 			if i < len(tokens) && tokens[i].Type == TOK_DOT {
 				i++
 			}
-			// IMPORTANT: ALTAR does not own process lifetime.
 			return i, nil
 		}
 
@@ -3354,8 +3541,45 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 			return i, fmt.Errorf("ALTAR: missing path after method %s at %s:%d:%d",
 				method, tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
 		}
-		path := tokens[i].Lexeme
-		i++
+
+		var path string
+
+		switch tokens[i].Type {
+		case TOK_STRING:
+			// Allow: ROUTE GET "/hello/world" TO ...
+			path = tokens[i].Lexeme
+			i++
+
+		case TOK_IDENT:
+			// Allow: ROUTE GET /hello (if lexer ever produces "/hello" as IDENT)
+			path = tokens[i].Lexeme
+			i++
+
+		case TOK_SLASH:
+			// Allow: ROUTE GET / hello / world TO ...
+			// Build a path out of alternating "/" + IDENT pieces.
+			path = "/"
+			i++
+
+			// Optional first segment after leading slash
+			if i < len(tokens) && tokens[i].Type == TOK_IDENT {
+				path += tokens[i].Lexeme
+				i++
+			}
+
+			for i < len(tokens) && tokens[i].Type == TOK_SLASH {
+				path += "/"
+				i++
+				if i < len(tokens) && tokens[i].Type == TOK_IDENT {
+					path += tokens[i].Lexeme
+					i++
+				}
+			}
+
+		default:
+			return i, fmt.Errorf("ALTAR: invalid path token %s at %s:%d:%d",
+				tokens[i].Type, tokens[i].File, tokens[i].Line, tokens[i].Column)
+		}
 
 		// Expect IDENT "TO"
 		if i >= len(tokens) || !(tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "TO")) {
@@ -3369,12 +3593,9 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 				tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
 		}
 
-		// ----------------------------------------------------
 		// 1) ROUTE ... TO WORK <handler>.
-		// ----------------------------------------------------
 		if tokens[i].Type == TOK_WORK {
-			i++ // WORK
-
+			i++
 			if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
 				return i, fmt.Errorf("ALTAR: expected WORK name after WORK at %s:%d:%d",
 					tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
@@ -3382,7 +3603,6 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 			handlerName := tokens[i].Lexeme
 			i++
 
-			// Optional DOT
 			if i < len(tokens) && tokens[i].Type == TOK_DOT {
 				i++
 			}
@@ -3390,7 +3610,6 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 			fmt.Printf("[SIC ALTAR ROUTE] Route %s %s -> WORK %s\n", method, path, handlerName)
 
 			altarMu.Lock()
-
 			routeKey := method + " " + path
 			if srv.registered[routeKey] {
 				altarMu.Unlock()
@@ -3399,31 +3618,26 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 			srv.registered[routeKey] = true
 
 			m := method
-			p := path
+			pth := path
 			h := handlerName
 			parent := sigils
 			mux := srv.mux
 
-			mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
+			mux.HandleFunc(pth, func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != m {
 					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 					return
 				}
-
 				work := findWork(prog, h)
 				if work == nil {
 					http.Error(w, "handler not found", http.StatusNotFound)
 					return
 				}
 
-				// Clone sigils (request-local state)
 				child := make(sigilTable)
 				cloneVisibleSigils(child, parent)
-
-				// Inject request details into SIGILs
 				injectRequestSigils(child, r)
 
-				// Capture the ritual's answer as HTTP body
 				body, err := execWork(prog, work, child, true)
 				if err != nil {
 					http.Error(w, "internal error", http.StatusInternalServerError)
@@ -3433,18 +3647,14 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 					body = "OK"
 				}
 
-				// Allow overrides via sigils
 				body = pickResponseBody(body, child)
-
-				// Apply headers + content type
 				applyResponseHeaders(w, child)
-				ct := chooseContentType("text/plain; charset=utf-8", p, child)
+
+				ct := chooseContentType("text/plain; charset=utf-8", body, child)
 				w.Header().Set("Content-Type", ct)
 
-				// Status
 				status := getResponseStatus(child)
 				w.WriteHeader(status)
-
 				_, _ = w.Write([]byte(body + "\n"))
 			})
 
@@ -3452,27 +3662,21 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 			continue
 		}
 
-		// ----------------------------------------------------
 		// 2) ROUTE ... TO SEND BACK <expr>.
-		// ----------------------------------------------------
 		if tokens[i].Type == TOK_SEND {
-			i++ // SEND
+			i++
 
-			// Allow blank lines between SEND and BACK/expression
 			for i < len(tokens) && tokens[i].Type == TOK_NEWLINE {
 				i++
 			}
 
-			// Optional BACK keyword (by lexeme)
 			if i < len(tokens) && strings.EqualFold(tokens[i].Lexeme, "BACK") {
-				i++ // after BACK
-				// Optional colon, e.g. SEND BACK: "OK".
+				i++
 				if i < len(tokens) && tokens[i].Type == TOK_COLON {
 					i++
 				}
 			}
 
-			// Expression starts here and runs up to DOT / NEWLINE / ENDALTAR
 			exprStart := i
 			for i < len(tokens) &&
 				tokens[i].Type != TOK_DOT &&
@@ -3482,11 +3686,9 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 			}
 			exprEnd := i
 
-			// Copy expression tokens so the closure has a stable slice
 			exprTokens := make([]Token, exprEnd-exprStart)
 			copy(exprTokens, tokens[exprStart:exprEnd])
 
-			// Optional DOT at end of route line
 			if i < len(tokens) && tokens[i].Type == TOK_DOT {
 				i++
 			}
@@ -3494,7 +3696,6 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 			fmt.Printf("[SIC ALTAR ROUTE] Route %s %s -> inline SEND BACK\n", method, path)
 
 			altarMu.Lock()
-
 			routeKey := method + " " + path
 			if srv.registered[routeKey] {
 				altarMu.Unlock()
@@ -3503,22 +3704,19 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 			srv.registered[routeKey] = true
 
 			m := method
-			p := path
+			pth := path
 			exprCopy := exprTokens
 			parent := sigils
 			mux := srv.mux
 
-			mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
+			mux.HandleFunc(pth, func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != m {
 					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 					return
 				}
 
-				// Clone sigils (request-local state)
 				child := make(sigilTable)
 				cloneVisibleSigils(child, parent)
-
-				// Inject request details into SIGILs
 				injectRequestSigils(child, r)
 
 				val, err := evalStringExpr(prog, exprCopy, child)
@@ -3530,17 +3728,14 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 					val = "OK"
 				}
 
-				// Allow overrides via sigils
 				val = pickResponseBody(val, child)
-
 				applyResponseHeaders(w, child)
 
-				ct := chooseContentType("text/plain; charset=utf-8", p, child)
+				ct := chooseContentType("text/plain; charset=utf-8", val, child)
 				w.Header().Set("Content-Type", ct)
 
 				status := getResponseStatus(child)
 				w.WriteHeader(status)
-
 				_, _ = w.Write([]byte(val + "\n"))
 			})
 
@@ -3548,7 +3743,6 @@ func execAltarBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 			continue
 		}
 
-		// If token after TO was neither WORK nor SEND
 		return i, fmt.Errorf("ALTAR: expected WORK or SEND after TO at %s:%d:%d",
 			tokens[i].File, tokens[i].Line, tokens[i].Column)
 	}
@@ -3590,21 +3784,28 @@ func evalSummonExpr(prog *Program, tokens []Token, start int, sigils sigilTable)
 
 	i++
 	if i >= len(tokens) || tokens[i].Type != TOK_WORK {
-		return "", 0, fmt.Errorf("SUMMON: expected WORK after SUMMON at %s:%d:%d",
-			tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
+		return "", 0, fmt.Errorf(
+			"SUMMON: expected WORK after SUMMON at %s:%d:%d",
+			tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column,
+		)
 	}
 	i++
 
 	if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
-		return "", 0, fmt.Errorf("SUMMON: expected WORK name after WORK at %s:%d:%d",
-			tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
+		return "", 0, fmt.Errorf(
+			"SUMMON: expected WORK name after WORK at %s:%d:%d",
+			tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column,
+		)
 	}
 	targetName := tokens[i].Lexeme
 	i++
 
 	argVal := ""
 	argFromSigil := ""       // if the arg was IDENT, track which sigil name
-	argWasInvisible := false // if argFromSigil was invisible, propagate invisibility to callee param
+	argWasInvisible := false // if argFromSigil was invisible, propagate invisibility
+
+	sealVal := ""
+	hasSeal := false
 
 	// Optional: WITH SIGIL <arg>
 	if i < len(tokens) && tokens[i].Type == TOK_WITH {
@@ -3630,13 +3831,14 @@ func evalSummonExpr(prog *Program, tokens []Token, start int, sigils sigilTable)
 			i++
 
 		case TOK_UNUSED:
-			// Sentinel: explicit "no argument" / ignored parameter
 			argVal = ""
 			i++
 
 		default:
-			return "", 0, fmt.Errorf("SUMMON: unsupported argument token %s at %s:%d:%d",
-				tokens[i].Type, tokens[i].File, tokens[i].Line, tokens[i].Column)
+			return "", 0, fmt.Errorf(
+				"SUMMON: unsupported argument token %s at %s:%d:%d",
+				tokens[i].Type, tokens[i].File, tokens[i].Line, tokens[i].Column,
+			)
 		}
 	}
 
@@ -3645,12 +3847,43 @@ func evalSummonExpr(prog *Program, tokens []Token, start int, sigils sigilTable)
 		return "", 0, fmt.Errorf("SUMMON: WORK %s not found", targetName)
 	}
 
+	// Optional: SEAL <value>
+	if i < len(tokens) && (tokens[i].Type == TOK_SEAL ||
+		(tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "SEAL"))) {
+
+		i++
+		hasSeal = true
+
+		if i >= len(tokens) {
+			return "", 0, fmt.Errorf("SUMMON: missing SEAL value")
+		}
+
+		switch tokens[i].Type {
+		case TOK_STRING:
+			sealVal = tokens[i].Lexeme
+			i++
+
+		case TOK_IDENT:
+			sealVal, _ = getSigil(sigils, tokens[i].Lexeme)
+			i++
+
+		case TOK_SIGIL:
+			i++
+			if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
+				return "", 0, fmt.Errorf("SUMMON: expected SIGIL name after SEAL SIGIL")
+			}
+			sealVal, _ = getSigil(sigils, tokens[i].Lexeme)
+			i++
+
+		default:
+			return "", 0, fmt.Errorf("SUMMON: invalid SEAL value token %s", tokens[i].Type)
+		}
+	}
+
 	// Build child environment:
 	// - inherit only VISIBLE sigils by default
 	// - set the first param to argVal if present
 	childSigils := make(sigilTable)
-
-	// Copy only visible sigils (and skip all meta keys)
 	cloneVisibleSigils(childSigils, sigils)
 
 	// If the callee expects a first parameter, bind it.
@@ -3658,10 +3891,27 @@ func evalSummonExpr(prog *Program, tokens []Token, start int, sigils sigilTable)
 		param := target.SigilParams[0]
 		childSigils[param] = argVal
 
-		// If the caller explicitly referenced an invisible sigil as the argument,
-		// that is an intentional reveal/copy into the callee param — keep it invisible there too.
+		// If caller explicitly referenced an invisible sigil as the arg,
+		// that is an intentional copy into the callee param; keep it invisible.
 		if argFromSigil != "" && argWasInvisible {
 			markInvisibleSigil(childSigils, param)
+		}
+	}
+
+	// If a seal was provided, store it in the child env (invisible).
+	if hasSeal {
+		setSigilInvisible(childSigils, sealSigilName(target.Name), sealVal)
+	}
+
+	// ✅ ENFORCE SEALED WORKS BEFORE RUNNING THEM
+	if target.Sealed {
+		want := target.SealToken
+		got, _ := getSigil(childSigils, sealSigilName(target.Name))
+
+		// Missing or wrong seal => raise OMEN and do not execute target.
+		if got == "" || got != want {
+			consumed := i - start
+			return "", consumed, &omenError{name: "sealed_work"}
 		}
 	}
 
