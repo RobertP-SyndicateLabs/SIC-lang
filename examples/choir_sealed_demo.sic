@@ -1,0 +1,20 @@
+LANGUAGE "SIC 1.0".
+SCROLL choir_sealed_demo
+MODE CHANT.
+
+WORK SEALED VAULT WITH SIGIL UNUSED AS TEXT SEAL "vault_key":
+    SAY: "VAULT opened.".
+    SEND BACK "TREASURE".
+ENDWORK.
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+    SAY: "CHOIR with default SEAL should unlock VAULT in parallel.".
+
+    CHOIR SEAL "vault_key":
+        SUMMON WORK VAULT.
+        SUMMON WORK VAULT.
+        SUMMON WORK VAULT.
+    ENDCHOIR.
+
+    SAY: "✅ done.".
+ENDWORK.

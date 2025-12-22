@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"strconv"
@@ -27,6 +28,67 @@ var (
 	altarMu     sync.Mutex
 	globalAltar *altarServer
 )
+
+const (
+	sicMaxRequestBodyBytes = 1 << 20 // 1 MiB cap (adjust as you like)
+	sicMaxQueryParams      = 64      // cap number of Q_ sigils
+	sicMaxSigilKeyLen      = 64      // cap key portion of Q_<KEY>
+	sicMaxSigilValLen      = 8192    // cap value stored in sigil
+)
+
+// sanitizeKeyForSigil turns an arbitrary query key into something safe for Q_.
+// Keeps A-Z0-9_ only, uppercases, collapses others into '_'.
+// Returns "" if nothing usable.
+func sanitizeKeyForSigil(key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+	key = strings.ToUpper(key)
+
+	var b strings.Builder
+	b.Grow(len(key))
+
+	lastUnderscore := false
+	for _, r := range key {
+		ok := (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+		if ok {
+			b.WriteRune(r)
+			lastUnderscore = false
+			continue
+		}
+		// map everything else to '_'
+		if !lastUnderscore {
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return ""
+	}
+	if len(out) > sicMaxSigilKeyLen {
+		out = out[:sicMaxSigilKeyLen]
+	}
+	return out
+}
+
+func clampSigilValue(v string) string {
+	if len(v) > sicMaxSigilValLen {
+		return v[:sicMaxSigilValLen]
+	}
+	return v
+}
+
+// setRequestSigil sets and marks invisible (request sigils should not leak).
+func setRequestSigil(sigils sigilTable, name, value string) {
+	if sigils == nil || name == "" {
+		return
+	}
+	sigils[name] = clampSigilValue(value)
+	markInvisibleSigil(sigils, name)
+}
 
 // Global entanglement state for the *current* CHAMBER.
 //
@@ -115,6 +177,8 @@ func cloneVisibleSigils(dst, src sigilTable) {
 
 const sicOmenSealedWork = "sealed_work"
 
+const sicChoirDefaultSealKey = "__SIC_CHOIR_DEFAULT_SEAL"
+
 const sicSealPrefix = "__SIC_SEAL__"
 
 func sealSigilName(workName string) string {
@@ -141,6 +205,25 @@ func redactIfTainted(val string, tainted bool) string {
 		return sicRedacted
 	}
 	return val
+}
+
+func isDisallowedResponseHeader(name string) bool {
+	// Hop-by-hop headers and other problematic ones
+	switch http.CanonicalHeaderKey(name) {
+	case "Connection", "Proxy-Connection", "Keep-Alive",
+		"Transfer-Encoding", "Te", "Trailer", "Upgrade",
+		"Host", "Content-Length":
+		return true
+	default:
+		return false
+	}
+}
+
+func cleanHeaderValue(v string) string {
+	// Prevent response splitting / header injection
+	v = strings.ReplaceAll(v, "\r", "")
+	v = strings.ReplaceAll(v, "\n", "")
+	return v
 }
 
 // exprSingleSigilRef returns (sigilName, true) if exprTokens represent
@@ -2971,6 +3054,57 @@ func execChoirBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 	startTok := tokens[i] // TOK_CHOIR
 	i++                   // after CHOIR
 
+	// Optional modifier: INVISIBLE
+	// Meaning: tasks inherit invisible sigils too (explicit opt-in).
+	inheritInvisible := false
+	if i < len(tokens) && (tokens[i].Type == TOK_INVISIBLE ||
+		(tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "INVISIBLE"))) {
+		inheritInvisible = true
+		i++
+	}
+
+	// Optional: SEAL <value> (default seal for SUMMONs in this CHOIR)
+	choirSealVal := ""
+	choirHasSeal := false
+
+	if i < len(tokens) && (tokens[i].Type == TOK_SEAL ||
+		(tokens[i].Type == TOK_IDENT && strings.EqualFold(tokens[i].Lexeme, "SEAL"))) {
+
+		i++ // consume SEAL
+
+		// allow newlines between SEAL and value
+		for i < len(tokens) && tokens[i].Type == TOK_NEWLINE {
+			i++
+		}
+		if i >= len(tokens) {
+			return i, fmt.Errorf("CHOIR: missing SEAL value at %s:%d:%d",
+				tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
+		}
+
+		switch tokens[i].Type {
+		case TOK_STRING:
+			choirSealVal = tokens[i].Lexeme
+			i++
+		case TOK_IDENT:
+			// treat IDENT as sigil lookup (same convention as SUMMON)
+			choirSealVal, _ = getSigil(sigils, tokens[i].Lexeme)
+			i++
+		case TOK_SIGIL:
+			i++
+			if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
+				return i, fmt.Errorf("CHOIR: expected SIGIL name after SEAL SIGIL at %s:%d:%d",
+					tokens[i-1].File, tokens[i-1].Line, tokens[i-1].Column)
+			}
+			choirSealVal, _ = getSigil(sigils, tokens[i].Lexeme)
+			i++
+		default:
+			return i, fmt.Errorf("CHOIR: invalid SEAL value token %s at %s:%d:%d",
+				tokens[i].Type, tokens[i].File, tokens[i].Line, tokens[i].Column)
+		}
+
+		choirHasSeal = true
+	}
+
 	// Optional colon: "CHOIR:" vs "CHOIR"
 	if i < len(tokens) && tokens[i].Type == TOK_COLON {
 		i++
@@ -2985,7 +3119,8 @@ func execChoirBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 	endPos := -1
 	for j := i; j < len(tokens); j++ {
 		t := tokens[j]
-		if t.Type == TOK_ENDCHOIR || (t.Type == TOK_IDENT && strings.EqualFold(t.Lexeme, "ENDCHOIR")) {
+		if t.Type == TOK_ENDCHOIR ||
+			(t.Type == TOK_IDENT && strings.EqualFold(t.Lexeme, "ENDCHOIR")) {
 			endPos = j
 			break
 		}
@@ -2995,103 +3130,168 @@ func execChoirBlock(prog *Program, tokens []Token, i int, sigils sigilTable) (in
 			startTok.File, startTok.Line, startTok.Column)
 	}
 
-	// Collect starting indices of SUMMON statements inside CHOIR body.
+	// Locate optional BIND_CHANT within CHOIR body.
+	// It is an IDENT keyword: BIND_CHANT (optionally with ':')
+	bindPos := -1
+	for j := i; j < endPos; j++ {
+		t := tokens[j]
+		if t.Type == TOK_IDENT && strings.EqualFold(t.Lexeme, "BIND_CHANT") {
+			bindPos = j
+			break
+		}
+	}
+
+	// Summon phase ends at bindPos if present, else endPos
+	summonEnd := endPos
+	if bindPos != -1 {
+		summonEnd = bindPos
+	}
+
+	// Collect starting indices of SUMMON statements inside CHOIR summon-phase.
 	var starts []int
 	j := i
-	for j < endPos {
+	for j < summonEnd {
 		tok := tokens[j]
 
 		if tok.Type == TOK_NEWLINE {
 			j++
 			continue
 		}
+
+		// ENDCHOIR terminates the body — not a statement
+		if tok.Type == TOK_ENDCHOIR ||
+			(tok.Type == TOK_IDENT && strings.EqualFold(tok.Lexeme, "ENDCHOIR")) {
+			break
+		}
+
 		if tok.Type != TOK_SUMMON {
-			return j, fmt.Errorf("CHOIR: only SUMMON statements are allowed inside CHOIR (got %s) at %s:%d:%d",
-				tok.Type, tok.File, tok.Line, tok.Column)
+			return j, fmt.Errorf(
+				"CHOIR: only SUMMON statements are allowed before BIND_CHANT (got %s) at %s:%d:%d",
+				tok.Type, tok.File, tok.Line, tok.Column,
+			)
 		}
 
 		stmtStart := j
 		starts = append(starts, stmtStart)
 
-		// Walk to end of this statement: DOT / NEWLINE / ENDCHOIR
-		for j < endPos &&
+		// Walk to end of this statement: DOT / NEWLINE / BIND_CHANT / ENDCHOIR
+		for j < summonEnd &&
 			tokens[j].Type != TOK_DOT &&
-			tokens[j].Type != TOK_NEWLINE &&
-			tokens[j].Type != TOK_ENDCHOIR {
+			tokens[j].Type != TOK_NEWLINE {
 			j++
 		}
-		if j < endPos && tokens[j].Type == TOK_DOT {
+		if j < summonEnd && tokens[j].Type == TOK_DOT {
 			j++
 		}
 
 		// Skip blank lines
-		for j < endPos && tokens[j].Type == TOK_NEWLINE {
+		for j < summonEnd && tokens[j].Type == TOK_NEWLINE {
 			j++
 		}
 	}
 
-	// No SUMMONs? Just skip.
-	if len(starts) == 0 {
-		k := endPos + 1
-		if k < len(tokens) && tokens[k].Type == TOK_DOT {
+	// ---- SNAPSHOT ONCE (determinism) ----
+	// baseSnapshot is what every task sees (then each gets its own copy).
+	baseSnapshot := make(sigilTable)
+	if inheritInvisible {
+		// Copy everything including invisibility meta markers.
+		for k, v := range sigils {
+			baseSnapshot[k] = v
+		}
+	} else {
+		// Default: only visible sigils.
+		cloneVisibleSigils(baseSnapshot, sigils)
+	}
+
+	// Apply CHOIR default SEAL into the snapshot so each task can inherit it.
+	if choirHasSeal {
+		// store as invisible so it never prints/leaks accidentally
+		setSigilInvisible(baseSnapshot, sicChoirDefaultSealKey, choirSealVal)
+	}
+
+	// If no SUMMONs, we still might have a BIND_CHANT to run.
+	if len(starts) > 0 {
+		// Worker pool size
+		workers := choirWorkerCount(sigils)
+		if workers < 1 {
+			workers = 1
+		}
+		if workers > len(starts) {
+			workers = len(starts)
+		}
+
+		type job struct {
+			order    int
+			startIdx int
+		}
+
+		jobs := make(chan job, len(starts))
+		results := make([]error, len(starts))
+
+		var wg sync.WaitGroup
+		wg.Add(workers)
+
+		// Start workers
+		for w := 0; w < workers; w++ {
+			go func() {
+				defer wg.Done()
+				for jb := range jobs {
+					// Per-task env: clone the snapshot into a new environment
+					taskSigils := make(sigilTable, len(baseSnapshot)+8)
+					for k, v := range baseSnapshot {
+						taskSigils[k] = v
+					}
+
+					// Execute the SUMMON statement using the per-task environment
+					_, err := execSummonStmt(prog, tokens, jb.startIdx, taskSigils)
+					results[jb.order] = err
+				}
+			}()
+		}
+
+		// Enqueue jobs in source order
+		for idx, s := range starts {
+			jobs <- job{order: idx, startIdx: s}
+		}
+		close(jobs)
+
+		wg.Wait()
+
+		// Deterministic error: first failing SUMMON in source order.
+		for _, err := range results {
+			if err != nil {
+				k := endPos + 1
+				if k < len(tokens) && tokens[k].Type == TOK_DOT {
+					k++
+				}
+				return k, err
+			}
+		}
+	}
+
+	// If there's a BIND_CHANT block, run it now (in parent sigil env)
+	if bindPos != -1 {
+		k := bindPos + 1
+
+		// Optional colon after BIND_CHANT
+		if k < endPos && tokens[k].Type == TOK_COLON {
 			k++
 		}
-		return k, nil
-	}
 
-	// Worker pool size:
-	workers := choirWorkerCount(sigils)
-	if workers < 1 {
-		workers = 1
-	}
-	if workers > len(starts) {
-		workers = len(starts)
-	}
+		// Skip leading newlines
+		for k < endPos && tokens[k].Type == TOK_NEWLINE {
+			k++
+		}
 
-	type job struct{ startIdx int }
-
-	jobs := make(chan job, len(starts))
-	errs := make(chan error, len(starts))
-
-	var wg sync.WaitGroup
-	wg.Add(workers)
-
-	// Start workers
-	for w := 0; w < workers; w++ {
-		go func() {
-			defer wg.Done()
-
-			for jb := range jobs {
-				// IMPORTANT: isolate per task. Clone visible sigils only (if you support invisibility).
-				taskSigils := make(sigilTable)
-				cloneVisibleSigils(taskSigils, sigils)
-
-				_, err := execSummonStmt(prog, tokens, jb.startIdx, taskSigils)
-				if err != nil {
-					errs <- err
+		// Execute statements until ENDCHOIR
+		if k < endPos {
+			if err := execBlock(prog, tokens[k:endPos], sigils); err != nil {
+				after := endPos + 1
+				if after < len(tokens) && tokens[after].Type == TOK_DOT {
+					after++
 				}
+				return after, err
 			}
-		}()
-	}
-
-	// Enqueue jobs
-	for _, s := range starts {
-		jobs <- job{startIdx: s}
-	}
-	close(jobs)
-
-	wg.Wait()
-	close(errs)
-
-	// Bubble first error if any.
-	for err := range errs {
-		if err != nil {
-			// Resume after ENDCHOIR (and optional DOT)
-			k := endPos + 1
-			if k < len(tokens) && tokens[k].Type == TOK_DOT {
-				k++
-			}
-			return k, err
 		}
 	}
 
@@ -3135,109 +3335,214 @@ func choirWorkerCount(sigils sigilTable) int {
 //
 // e.g. ?name=Ada  => SIGIL Q_NAME BE "Ada"
 func injectRequestSigils(child sigilTable, r *http.Request) {
-	if r == nil {
+	if child == nil || r == nil {
 		return
 	}
 
-	child["REQUEST_METHOD"] = r.Method
-	markInvisibleSigil(child, "REQUEST_METHOD")
+	// Core request line info (always invisible)
+	setRequestSigil(child, "REQUEST_METHOD", r.Method)
 
 	if r.URL != nil {
-		child["REQUEST_PATH"] = r.URL.Path
-		child["REQUEST_QUERY"] = r.URL.RawQuery
-		markInvisibleSigil(child, "REQUEST_PATH")
-		markInvisibleSigil(child, "REQUEST_QUERY")
+		setRequestSigil(child, "REQUEST_PATH", r.URL.Path)
+		setRequestSigil(child, "REQUEST_QUERY", r.URL.RawQuery)
 	} else {
-		child["REQUEST_PATH"] = ""
-		child["REQUEST_QUERY"] = ""
-		markInvisibleSigil(child, "REQUEST_PATH")
-		markInvisibleSigil(child, "REQUEST_QUERY")
+		setRequestSigil(child, "REQUEST_PATH", "")
+		setRequestSigil(child, "REQUEST_QUERY", "")
 	}
 
-	// Query params: Q_<KEY>
+	// Query params: Q_<KEY> (invisible, bounded)
 	if r.URL != nil {
 		q := r.URL.Query()
+		added := 0
 		for key, vals := range q {
+			if added >= sicMaxQueryParams {
+				break
+			}
 			if len(vals) == 0 {
 				continue
 			}
-			sigilName := "Q_" + strings.ToUpper(key)
-			child[sigilName] = vals[0]
-			// Query params can be considered "non-secret", but marking invisible is safer by default.
-			markInvisibleSigil(child, sigilName)
+			safeKey := sanitizeKeyForSigil(key)
+			if safeKey == "" {
+				continue
+			}
+			name := "Q_" + safeKey
+			setRequestSigil(child, name, vals[0])
+			added++
 		}
 	}
 
-	child["REQUEST_BODY"] = ""
-	markInvisibleSigil(child, "REQUEST_BODY")
+	// Body (invisible, bounded)
+	setRequestSigil(child, "REQUEST_BODY", "")
 
 	if r.Body != nil {
-		bodyBytes, err := io.ReadAll(r.Body)
+		// Read at most sicMaxRequestBodyBytes+1 so we can detect truncation
+		limited := io.LimitReader(r.Body, sicMaxRequestBodyBytes+1)
+		bodyBytes, err := io.ReadAll(limited)
 		if err == nil {
-			child["REQUEST_BODY"] = string(bodyBytes)
+			truncated := false
+			if len(bodyBytes) > sicMaxRequestBodyBytes {
+				bodyBytes = bodyBytes[:sicMaxRequestBodyBytes]
+				truncated = true
+			}
+			bodyStr := string(bodyBytes)
+			if truncated {
+				// Optional: you can also set an extra invisible sigil if you want.
+				// setRequestSigil(child, "REQUEST_BODY_TRUNCATED", "true")
+				bodyStr += "\n"
+			}
+			setRequestSigil(child, "REQUEST_BODY", bodyStr)
+
+			// Rewind body so downstream handlers can still read it
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
 	}
 }
 
-// chooseContentType picks the HTTP Content-Type for an ALTAR response.
-// Priority:
-//  1. SIGIL response_content_type (if set by the WORK or inline route)
-//  2. ".json" suffix on the route path -> application/json
-//  3. fallback to the provided defaultCT.
-func chooseContentType(defaultCT, path string, sigils sigilTable) string {
-	if sigils != nil {
-		if ct, ok := sigils["response_content_type"]; ok && strings.TrimSpace(ct) != "" {
-			return strings.TrimSpace(ct)
-		}
+// ---------------- ALTAR Response Semantics ----------------
+//
+// Response contract (sigils, typically INVISIBLE):
+//
+//   RESPONSE_STATUS            -> HTTP status code (default 200)
+//   RESPONSE_CONTENT_TYPE      -> Content-Type override (default fallback provided by runtime)
+//   RESPONSE_BODY              -> Body override (wins over SEND BACK / WORK return)
+//   RESPONSE_HEADER_<NAME>     -> Header set. Underscore becomes hyphen.
+//                                Example: RESPONSE_HEADER_X_Request_ID -> "abc"
+//
+// Notes:
+// - These should generally be INVISIBLE sigils so they don't accidentally leak across SUMMON.
+// - Runtime internal helpers read them regardless of invisibility.
+
+const (
+	sicResponseStatusSigil      = "RESPONSE_STATUS"
+	sicResponseContentTypeSigil = "RESPONSE_CONTENT_TYPE"
+	sicResponseBodySigil        = "RESPONSE_BODY"
+	sicResponseHeaderPrefix     = "RESPONSE_HEADER_"
+)
+
+// getInternalSigil fetches a sigil value even if it is invisible.
+// (Invisibility is a user-level semantic, not a runtime internal read barrier.)
+func getInternalSigil(sigils sigilTable, name string) (string, bool) {
+	if sigils == nil || name == "" {
+		return "", false
 	}
-	if strings.HasSuffix(path, ".json") {
-		return "application/json; charset=utf-8"
-	}
-	return defaultCT
+	v, ok := sigils[name]
+	return v, ok
 }
 
+// pickResponseBody returns RESPONSE_BODY if present and non-empty; otherwise returns computed.
+func pickResponseBody(computed string, sigils sigilTable) string {
+	if v, ok := getInternalSigil(sigils, sicResponseBodySigil); ok && strings.TrimSpace(v) != "" {
+		return v
+	}
+	return computed
+}
+
+// getResponseStatus reads RESPONSE_STATUS as an int in [100..599]. Defaults to 200.
 func getResponseStatus(sigils sigilTable) int {
-	if sigils == nil {
+	raw, ok := getInternalSigil(sigils, sicResponseStatusSigil)
+	if !ok || strings.TrimSpace(raw) == "" {
 		return http.StatusOK
 	}
-	raw := strings.TrimSpace(sigils["response_status"])
-	if raw == "" {
+
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
 		return http.StatusOK
 	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 100 || n > 599 {
+	if n < 100 || n > 599 {
 		return http.StatusOK
 	}
 	return n
 }
 
+// chooseContentType returns RESPONSE_CONTENT_TYPE if set; otherwise fallback.
+// You can optionally auto-pick JSON if body "looks like json", but this keeps it deterministic.
+// chooseContentType returns a safe Content-Type.
+// Priority: RESPONSE_CONTENT_TYPE sigil -> fallback -> default.
+func chooseContentType(fallback string, body string, sigils sigilTable) string {
+	// 1) If runtime/internal sigil sets it, prefer that (but sanitize + validate).
+	if v, ok := getInternalSigil(sigils, sicResponseContentTypeSigil); ok {
+		if ct := sanitizeAndValidateContentType(v); ct != "" {
+			return ct
+		}
+		// If invalid, ignore and proceed to fallback.
+	}
+
+	// 2) Fallback
+	if ct := sanitizeAndValidateContentType(fallback); ct != "" {
+		return ct
+	}
+
+	// 3) Safe default
+	return "text/plain; charset=utf-8"
+}
+
+func sanitizeAndValidateContentType(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	// Prevent header injection / response splitting
+	raw = strings.ReplaceAll(raw, "\r", "")
+	raw = strings.ReplaceAll(raw, "\n", "")
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	mediaType, params, err := mime.ParseMediaType(raw)
+	if err != nil {
+		return ""
+	}
+
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+	if mediaType == "" {
+		return ""
+	}
+
+	// If no charset provided and it's a text/* type, default to utf-8.
+	// (Optional but nice to keep consistent behavior.)
+	if strings.HasPrefix(mediaType, "text/") {
+		if _, ok := params["charset"]; !ok {
+			params["charset"] = "utf-8"
+		}
+	}
+
+	// Recompose canonical form
+	return mime.FormatMediaType(mediaType, params)
+}
+
+// applyResponseHeaders scans RESPONSE_HEADER_* sigils and sets them on the response.
+// Header name rules:
+// - "RESPONSE_HEADER_X_Foo" -> "X-Foo"
+// - underscores are converted to hyphens
 func applyResponseHeaders(w http.ResponseWriter, sigils sigilTable) {
 	if w == nil || sigils == nil {
 		return
 	}
-	for k, v := range sigils {
-		if !strings.HasPrefix(k, "response_header_") {
-			continue
-		}
-		hname := strings.TrimPrefix(k, "response_header_")
-		hname = strings.ReplaceAll(hname, "_", "-")
-		hname = strings.TrimSpace(hname)
-		if hname == "" {
-			continue
-		}
-		w.Header().Set(hname, v)
-	}
-}
 
-func pickResponseBody(defaultBody string, sigils sigilTable) string {
-	if sigils == nil {
-		return defaultBody
+	for k, v := range sigils {
+		if strings.HasPrefix(k, sicInvisibleMetaPrefix) {
+			continue
+		}
+		if !strings.HasPrefix(k, sicResponseHeaderPrefix) {
+			continue
+		}
+
+		name := strings.TrimPrefix(k, sicResponseHeaderPrefix)
+		name = strings.ReplaceAll(name, "_", "-")
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+
+		if isDisallowedResponseHeader(name) {
+			// silently ignore (or you could raise an OMEN later)
+			continue
+		}
+
+		w.Header().Set(name, cleanHeaderValue(v))
 	}
-	if b := strings.TrimSpace(sigils["response_body"]); b != "" {
-		return b
-	}
-	return defaultBody
 }
 
 // ---------------- ALTAR / ROUTE Canticle ----------------
@@ -3845,6 +4150,14 @@ func evalSummonExpr(prog *Program, tokens []Token, start int, sigils sigilTable)
 	target := findWork(prog, targetName)
 	if target == nil {
 		return "", 0, fmt.Errorf("SUMMON: WORK %s not found", targetName)
+	}
+
+	// If SUMMON didn't specify SEAL explicitly, allow CHOIR default seal.
+	if !hasSeal {
+		if def, ok := getSigil(sigils, sicChoirDefaultSealKey); ok && strings.TrimSpace(def) != "" {
+			sealVal = def
+			hasSeal = true
+		}
 	}
 
 	// Optional: SEAL <value>

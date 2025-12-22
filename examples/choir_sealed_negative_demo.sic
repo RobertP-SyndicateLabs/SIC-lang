@@ -1,0 +1,24 @@
+LANGUAGE "SIC 1.0".
+SCROLL choir_sealed_negative_demo
+MODE CHANT.
+
+WORK SEALED VAULT WITH SIGIL UNUSED AS TEXT SEAL "vault_key":
+    SAY: "VAULT opened.".
+    SEND BACK "TREASURE".
+ENDWORK.
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+    SAY: "CHOIR with wrong default SEAL should fail deterministically.".
+
+    OMEN "sealed_work":
+        CHOIR SEAL "wrong_key":
+            SUMMON WORK VAULT.
+            SUMMON WORK VAULT.
+        ENDCHOIR.
+        SAY: "❌ BAD: choir bypassed seal.".
+    FALLS_TO_RUIN:
+        SAY: "✅ Correct: sealed_work blocked VAULT.".
+    ENDOMEN.
+
+    SAY: "done.".
+ENDWORK.

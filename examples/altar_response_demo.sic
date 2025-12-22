@@ -2,28 +2,35 @@ LANGUAGE "SIC 1.0".
 SCROLL altar_response_demo
 MODE CHANT.
 
-WORK JSON_OK WITH SIGIL UNUSED AS TEXT:
-    LET SIGIL response_status BE "200".
-    LET SIGIL response_content_type BE "application/json; charset=utf-8".
-    LET SIGIL response_header_Cache_Control BE "no-store".
-    SEND BACK "{\"ok\":true}".
+WORK JSON_INFO WITH SIGIL UNUSED AS TEXT:
+    // Response controls (ALTAR reads these invisible sigils)
+    INVISIBLE SIGIL RESPONSE_STATUS BE "201".
+    INVISIBLE SIGIL RESPONSE_CONTENT_TYPE BE "application/json; charset=utf-8".
+    INVISIBLE SIGIL RESPONSE_HEADER_X_Request_ID BE "req-123".
+    INVISIBLE SIGIL RESPONSE_HEADER_Cache_Control BE "no-store".
+
+    // Valid JSON body (SIC string quoting)
+    SEND BACK "{""ok"":true,""service"":""SIC"",""mode"":""ALTAR"",""endpoint"":""/info""}".
 ENDWORK.
 
-WORK NOT_FOUND WITH SIGIL UNUSED AS TEXT:
-    LET SIGIL response_status BE "404".
-    SEND BACK "not found".
+WORK PLAIN_OK WITH SIGIL UNUSED AS TEXT:
+    // No response sigils set -> should default to 200 + text/plain
+    SEND BACK "plain ok".
 ENDWORK.
 
 WORK MAIN WITH SIGIL UNUSED AS TEXT:
     SAY: "Raising ALTAR response demo.".
-    ALTAR AT :15080:
-        ROUTE GET "/ok.json" TO WORK JSON_OK.
-        ROUTE GET "/nope" TO WORK NOT_FOUND.
+
+    ALTAR AT :15083:
+        ROUTE GET /info TO WORK JSON_INFO.
+        ROUTE GET /plain TO WORK PLAIN_OK.
     ENDALTAR.
 
-    SAY: "ALTAR active (CTRL+C to exit)." .
-    LET SIGIL forever BE "yes".
-    WHILE SIGIL forever EQUALS "yes":
-        SLEEP FOR 1000 SECONDS.
+    SAY: "ALTAR response demo active on :15083 (/info and /plain).".
+    SAY: "Now curl from another terminal (or keep this running).".
+
+    LET forever BE "yes".
+    WHILE forever IS "yes":
+        SLEEP 1000.
     ENDWHILE.
 ENDWORK.
