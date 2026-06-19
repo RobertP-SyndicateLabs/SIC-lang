@@ -1,0 +1,13 @@
+LANGUAGE "SIC 1.0".
+SCROLL hands_demo
+MODE CHANT.
+
+WORK MAIN WITH SIGIL UNUSED AS TEXT:
+  LET SIGIL phrase BE "  Sic Lang  ".
+  SAY: LOWER(TRIM(phrase)).
+  SAY: UPPER(TRIM(phrase)).
+  SAY: LENGTH(TRIM(phrase)).
+  SAY: CONTAINS(TRIM(phrase), "Lang").
+  SAY: STARTS_WITH(TRIM(phrase), "Sic").
+  SAY: ENDS_WITH(TRIM(phrase), "Lang").
+ENDWORK.

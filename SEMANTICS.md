@@ -504,3 +504,38 @@ They will not retroactively alter the meaning of constructs defined here.
 SIC is a language of intention.
 What is written is what executes.
 What executes is what was written.
+
+13. HANDS Expression Functions
+
+HANDS functions are pure expression-level text operations.
+
+They may appear anywhere a value expression is accepted, including SAY, LET, IF, WHILE, SEND BACK, and other expression contexts.
+
+HANDS functions:
+
+do not mutate SIGILs,
+
+do not perform I/O,
+
+do not create collections,
+
+do not alter execution order.
+
+Defined HANDS functions:
+
+LOWER(text) returns text lowercased.
+
+UPPER(text) returns text uppercased.
+
+TRIM(text) removes leading and trailing whitespace.
+
+LENGTH(text) returns the number of Unicode characters.
+
+CONTAINS(text, value) returns true if text contains value.
+
+STARTS_WITH(text, prefix) returns true if text begins with prefix.
+
+ENDS_WITH(text, suffix) returns true if text ends with suffix.
+
+HANDS does not define LIST, COLLECTION, SPLIT, JOIN, FIELD, OBSERVE, FRAME, JSON, FILE, or HTTP behavior.
+

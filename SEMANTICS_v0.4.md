@@ -410,3 +410,28 @@ It is designed to be correct, explicit, and trustworthy.
 Execution is ceremony.
 State is responsibility.
 Failure is acknowledged — not ignored.
+
+12. HANDS Runtime Semantics
+
+HANDS calls are parsed by the runtime expression walker as function-like expression primaries.
+
+Evaluation rules:
+
+arguments are evaluated eagerly from left to right,
+
+arguments are separated by commas,
+
+the call completes before surrounding operators continue,
+
+wrong arity is a runtime error,
+
+results are ordinary expression values.
+
+Text functions return text values: LOWER, UPPER, TRIM.
+
+LENGTH returns an integer character count.
+
+Predicate functions return boolean values: CONTAINS, STARTS_WITH, ENDS_WITH.
+
+HANDS functions are expression-only and do not introduce parser-level statements or collection semantics.
+

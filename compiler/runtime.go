@@ -932,6 +932,108 @@ func evalTimePrimitiveName(name string) (exprValue, bool) {
 	}
 }
 
+func evalHandsFunction(name string, args []exprValue) (exprValue, error) {
+	arity := func(want int) error {
+		if len(args) != want {
+			return fmt.Errorf("%s: expected %d argument(s), got %d", strings.ToUpper(name), want, len(args))
+		}
+		return nil
+	}
+
+	switch strings.ToUpper(name) {
+	case "LOWER":
+		if err := arity(1); err != nil {
+			return exprValue{}, err
+		}
+		return withTaint(makeText(strings.ToLower(args[0].String())), args[0].tainted), nil
+	case "UPPER":
+		if err := arity(1); err != nil {
+			return exprValue{}, err
+		}
+		return withTaint(makeText(strings.ToUpper(args[0].String())), args[0].tainted), nil
+	case "TRIM":
+		if err := arity(1); err != nil {
+			return exprValue{}, err
+		}
+		return withTaint(makeText(strings.TrimSpace(args[0].String())), args[0].tainted), nil
+	case "LENGTH":
+		if err := arity(1); err != nil {
+			return exprValue{}, err
+		}
+		return withTaint(makeInt(int64(len([]rune(args[0].String())))), args[0].tainted), nil
+	case "CONTAINS":
+		if err := arity(2); err != nil {
+			return exprValue{}, err
+		}
+		out := makeBool(strings.Contains(args[0].String(), args[1].String()))
+		return combineTaint(out, args[0], args[1]), nil
+	case "STARTS_WITH":
+		if err := arity(2); err != nil {
+			return exprValue{}, err
+		}
+		out := makeBool(strings.HasPrefix(args[0].String(), args[1].String()))
+		return combineTaint(out, args[0], args[1]), nil
+	case "ENDS_WITH":
+		if err := arity(2); err != nil {
+			return exprValue{}, err
+		}
+		out := makeBool(strings.HasSuffix(args[0].String(), args[1].String()))
+		return combineTaint(out, args[0], args[1]), nil
+	default:
+		return exprValue{}, fmt.Errorf("unknown HANDS function %s", name)
+	}
+}
+
+func isHandsFunctionName(name string) bool {
+	switch strings.ToUpper(name) {
+	case "LOWER", "UPPER", "TRIM", "LENGTH", "CONTAINS", "STARTS_WITH", "ENDS_WITH":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseHandsFunctionCall(prog *Program, nameTok Token, tokens []Token, i *int, sigils sigilTable) (exprValue, error) {
+	name := nameTok.Lexeme
+	*i++ // function name
+
+	if *i >= len(tokens) || tokens[*i].Type != TOK_LPAREN {
+		return exprValue{}, fmt.Errorf("%s: expected '(' at %s:%d:%d",
+			strings.ToUpper(name), nameTok.File, nameTok.Line, nameTok.Column)
+	}
+	*i++ // (
+
+	args := make([]exprValue, 0, 2)
+	if *i < len(tokens) && tokens[*i].Type == TOK_RPAREN {
+		*i++
+		return evalHandsFunction(name, args)
+	}
+
+	for {
+		arg, err := parseOr(prog, tokens, i, sigils)
+		if err != nil {
+			return exprValue{}, err
+		}
+		args = append(args, arg)
+
+		if *i >= len(tokens) {
+			return exprValue{}, fmt.Errorf("%s: expected ')' in function call at %s:%d:%d",
+				strings.ToUpper(name), nameTok.File, nameTok.Line, nameTok.Column)
+		}
+		if tokens[*i].Type == TOK_RPAREN {
+			*i++
+			break
+		}
+		if tokens[*i].Type != TOK_COMMA {
+			return exprValue{}, fmt.Errorf("%s: expected ',' or ')' in function call at %s:%d:%d",
+				strings.ToUpper(name), tokens[*i].File, tokens[*i].Line, tokens[*i].Column)
+		}
+		*i++ // ,
+	}
+
+	return evalHandsFunction(name, args)
+}
+
 func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exprValue, error) {
 	if *i >= len(tokens) {
 		return exprValue{}, fmt.Errorf("unexpected end of expression")
@@ -1060,6 +1162,10 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 
 	// Bare IDENT => sigil lookup
 	case TOK_IDENT:
+		if isHandsFunctionName(tok.Lexeme) && *i+1 < len(tokens) && tokens[*i+1].Type == TOK_LPAREN {
+			return parseHandsFunctionCall(prog, tok, tokens, i, sigils)
+		}
+
 		if v, ok := evalTimePrimitiveName(tok.Lexeme); ok {
 			*i++
 			return v, nil

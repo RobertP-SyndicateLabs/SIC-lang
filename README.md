@@ -105,6 +105,29 @@ SIC is designed for:
 - AI systems that must express intent safely and explicitly
 
 
+
+### HANDS — Text Expression Functions
+
+HANDS functions are pure expression helpers for text shaping and checks. They do not mutate SIGILs and are used only inside expressions.
+
+```sic
+SAY: LOWER(TRIM(phrase)).
+SAY: LENGTH(phrase).
+SAY: CONTAINS(phrase, "SIC").
+```
+
+Available HANDS functions:
+
+- `LOWER(text)`
+- `UPPER(text)`
+- `TRIM(text)`
+- `LENGTH(text)`
+- `CONTAINS(text, value)`
+- `STARTS_WITH(text, prefix)`
+- `ENDS_WITH(text, suffix)`
+
+HANDS does not define LIST, COLLECTION, SPLIT, JOIN, FIELD, OBSERVE, FRAME, JSON, FILE, or HTTP behavior.
+
 ## Core Concepts
 
 ### WORK — Units of Intention
