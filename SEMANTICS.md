@@ -1,21 +1,3 @@
-Excellent — this is the right moment to do this.
-Below is a full, drop-in replacement for SEMANTICS.md, adjusted to:
-
-Reflect v0.4.0 reality
-
-Stay stable and authoritative
-
-Avoid over-promising future behavior
-
-Cleanly defer deeper detail to SEMANTICS_v0.4.md
-
-
-This version is intentionally high-level, normative, and durable.
-You can paste this in as-is.
-
-
-
-
 SIC Language Semantics
 
 Version: v0.4.0 — Orchestration Canticle
@@ -316,29 +298,28 @@ WEAVE introduces no concurrency.
 
 9. CHOIR
 
-CHOIR defines orchestrated isolation.
+CHOIR defines parallel orchestrated isolation.
 
 Inside a CHOIR:
 
-only SUMMON statements are allowed,
+only SUMMON statements are allowed before BIND_CHANT,
 
-each SUMMON receives an identical snapshot of visible sigils,
+each SUMMON receives an identical isolated snapshot of eligible sigils,
 
-SUMMONs execute in an isolated manner.
+SUMMONs execute through a bounded worker pool,
+
+no SUMMON can observe another SUMMON's mutations.
 
 
 CHOIR Guarantees
 
-no shared mutable state,
+no shared mutable state between SUMMON tasks,
 
 no sigil leakage between SUMMONs,
 
-deterministic observable behavior.
+errors are collected and reported deterministically in source order,
 
-
-> Note:
-In v0.4.0, CHOIR execution is sequential with isolation.
-True parallel execution is a planned extension and will not alter these guarantees.
+BIND_CHANT, when present, runs only after all CHOIR SUMMONs complete.
 
 
 

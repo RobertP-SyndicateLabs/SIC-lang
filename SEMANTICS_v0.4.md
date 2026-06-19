@@ -181,28 +181,30 @@ failure propagates immediately
 
 6. CHOIR Execution Semantics (v0.4)
 
-CHOIR provides isolated orchestration, not shared concurrency.
+CHOIR provides parallel isolated orchestration.
 
 In v0.4:
 
-SUMMONs execute sequentially
+SUMMONs execute through a bounded worker pool
 
-each receives the same sigil snapshot
+each task receives the same isolated sigil snapshot
 
 no SUMMON can observe another’s mutations
+
+errors are collected and reported deterministically in source order
+
+BIND_CHANT, when present, runs only after all CHOIR SUMMONs complete
 
 
 This design guarantees:
 
-deterministic behavior
+parallel task execution
 
-future parallelization safety
+deterministic error reporting
 
-absence of data races
+absence of shared mutable state between CHOIR tasks
 
-
-> Forward Compatibility Rule:
-Any future parallel execution must preserve v0.4 observable behavior.
+source-order behavior for post-CHOIR continuation
 
 
 

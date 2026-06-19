@@ -1,11 +1,24 @@
 SIC-lang — The Ritual Orchestration Language
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
-[![CI](https://github.com/RobertP-SyndicateLabs/SIC-lang/actions/workflows/ci.yml/badge.svg)](https://github.com/RobertP-SyndicateLabs/SIC-lang/actions)
+**CI:** pending
 
 **Version:** v0.4.0  
 **License:** Apache 2.0  
 **Status:** Active Development  
+
+
+## Build From Source
+
+```sh
+CGO_ENABLED=0 go build -o sic ./cli
+```
+
+Run the example smoke suite with:
+
+```sh
+scripts/run_examples.sh
+```
 
 A language of intention, discipline, and deterministic orchestration.
 
@@ -169,7 +182,7 @@ WEAVE / CHOIR — Orchestration
 
 WEAVE: sequential orchestration
 
-CHOIR: multi-task orchestration (v0.4.0 runs sequentially; parallel execution planned)
+CHOIR: parallel multi-task orchestration using isolated sigil snapshots and deterministic source-order error reporting
 
 
 
@@ -288,7 +301,7 @@ OMEN / FALLS / FALLS_TO_RUIN
 
 WEAVE orchestration
 
-CHOIR (sequential baseline)
+CHOIR worker pool with isolated snapshots and deterministic source-order errors
 
 CHAMBER scoping
 
@@ -317,8 +330,6 @@ Positive + negative example suite
 
 
 In Progress
-
-CHOIR worker pool (true parallelism)
 
 Richer diagnostics
 

@@ -1259,6 +1259,14 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 			i = next
 			continue
 
+		case TOK_LOG:
+			next, err := execLog(prog, tokens, i, sigils)
+			if err != nil {
+				return "", err
+			}
+			i = next
+			continue
+
 		case TOK_IDENT:
 			switch tok.Lexeme {
 			case "SEND":
