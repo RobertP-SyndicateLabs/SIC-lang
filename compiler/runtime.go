@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,6 +28,7 @@ type altarServer struct {
 var (
 	altarMu     sync.Mutex
 	globalAltar *altarServer
+	sicTimeTick uint64
 )
 
 const (
@@ -899,6 +901,37 @@ func parseUnary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exprV
 	return parsePrimary(prog, tokens, i, sigils)
 }
 
+
+func evalTimePrimitiveToken(tt TokenType) (exprValue, bool) {
+	switch tt {
+	case TOK_TIME_NOW:
+		return makeInt(time.Now().Unix()), true
+	case TOK_TIME_TICK:
+		return makeInt(int64(atomic.AddUint64(&sicTimeTick, 1))), true
+	case TOK_TIME_UNIX_MS:
+		return makeInt(time.Now().UnixMilli()), true
+	case TOK_TIME_RFC3339:
+		return makeText(time.Now().UTC().Format(time.RFC3339)), true
+	default:
+		return exprValue{}, false
+	}
+}
+
+func evalTimePrimitiveName(name string) (exprValue, bool) {
+	switch {
+	case strings.EqualFold(name, "TIME_NOW"):
+		return evalTimePrimitiveToken(TOK_TIME_NOW)
+	case strings.EqualFold(name, "TIME_TICK"):
+		return evalTimePrimitiveToken(TOK_TIME_TICK)
+	case strings.EqualFold(name, "TIME_UNIX_MS"):
+		return evalTimePrimitiveToken(TOK_TIME_UNIX_MS)
+	case strings.EqualFold(name, "TIME_RFC3339"):
+		return evalTimePrimitiveToken(TOK_TIME_RFC3339)
+	default:
+		return exprValue{}, false
+	}
+}
+
 func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exprValue, error) {
 	if *i >= len(tokens) {
 		return exprValue{}, fmt.Errorf("unexpected end of expression")
@@ -939,9 +972,11 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 		*i++
 		return makeText(tok.Lexeme), nil
 
-	case TOK_TIME_NOW:
+	case TOK_TIME_NOW, TOK_TIME_TICK, TOK_TIME_UNIX_MS, TOK_TIME_RFC3339:
 		*i++
-		return makeInt(time.Now().Unix()), nil
+		if v, ok := evalTimePrimitiveToken(tok.Type); ok {
+			return v, nil
+		}
 
 	// "SIGIL name" legacy form
 	case TOK_SIGIL:
@@ -972,7 +1007,7 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 	// $NAME
 	case TOK_DOLLAR:
 		*i++
-		if *i >= len(tokens) || tokens[*i].Type != TOK_IDENT {
+		if *i >= len(tokens) {
 			return exprValue{}, fmt.Errorf("expected SIGIL name after $ at %s:%d:%d",
 				tok.File, tok.Line, tok.Column)
 		}
@@ -980,8 +1015,16 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 		name := nameTok.Lexeme
 		*i++
 
-		if strings.EqualFold(name, "TIME_NOW") {
-			return makeInt(time.Now().Unix()), nil
+		if v, ok := evalTimePrimitiveToken(nameTok.Type); ok {
+			return v, nil
+		}
+		if v, ok := evalTimePrimitiveName(name); ok {
+			return v, nil
+		}
+
+		if nameTok.Type != TOK_IDENT {
+			return exprValue{}, fmt.Errorf("expected SIGIL name after $ at %s:%d:%d",
+				nameTok.File, nameTok.Line, nameTok.Column)
 		}
 
 		val, ok := sigils[name]
@@ -1017,9 +1060,9 @@ func parsePrimary(prog *Program, tokens []Token, i *int, sigils sigilTable) (exp
 
 	// Bare IDENT => sigil lookup
 	case TOK_IDENT:
-		if strings.EqualFold(tok.Lexeme, "TIME_NOW") {
+		if v, ok := evalTimePrimitiveName(tok.Lexeme); ok {
 			*i++
-			return makeInt(time.Now().Unix()), nil
+			return v, nil
 		}
 
 		val, ok := sigils[tok.Lexeme]

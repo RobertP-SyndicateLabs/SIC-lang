@@ -126,10 +126,13 @@ const (
 	TOK_LOG TokenType = "LOG" // LOG keyword or symbol
 
 	// Time / scheduling
-	TOK_TIME_NOW TokenType = "TIME_NOW"
-	TOK_SLEEP    TokenType = "SLEEP"
-	TOK_FOR      TokenType = "FOR"
-	TOK_SECONDS  TokenType = "SECONDS"
+	TOK_TIME_NOW     TokenType = "TIME_NOW"
+	TOK_TIME_TICK    TokenType = "TIME_TICK"
+	TOK_TIME_UNIX_MS TokenType = "TIME_UNIX_MS"
+	TOK_TIME_RFC3339 TokenType = "TIME_RFC3339"
+	TOK_SLEEP        TokenType = "SLEEP"
+	TOK_FOR          TokenType = "FOR"
+	TOK_SECONDS      TokenType = "SECONDS"
 
 	// Binding / assignment-style keyword (if you're using it anywhere)
 	TOK_BIND TokenType = "BIND"

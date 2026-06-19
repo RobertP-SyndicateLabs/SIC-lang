@@ -400,10 +400,13 @@ var keywords = map[string]TokenType{
 	"SCRIBE": TOK_LOG,
 
 	// Time
-	"TIME_NOW": TOK_TIME_NOW,
-	"SLEEP":    TOK_SLEEP,
-	"FOR":      TOK_FOR,
-	"SECONDS":  TOK_SECONDS,
+	"TIME_NOW":     TOK_TIME_NOW,
+	"TIME_TICK":    TOK_TIME_TICK,
+	"TIME_UNIX_MS": TOK_TIME_UNIX_MS,
+	"TIME_RFC3339": TOK_TIME_RFC3339,
+	"SLEEP":        TOK_SLEEP,
+	"FOR":          TOK_FOR,
+	"SECONDS":      TOK_SECONDS,
 
 	"INVISIBLE": TOK_INVISIBLE,
 
