@@ -106,6 +106,18 @@ SIC is designed for:
 
 
 
+
+### MIRRORS — Minimal JSON
+
+MIRRORS currently provides compact JSON text validation and serialization through statement forms. JSON is stored in SIGILs as canonical compact text.
+
+```sic
+BIND JSON FROM raw AS SIGIL cfg.
+WRITE JSON cfg AS TEXT INTO SIGIL out.
+```
+
+Invalid JSON raises the stable OMEN name `invalid_json`. MIRRORS does not currently provide field access, mutation, object models, LIST, or COLLECTION behavior.
+
 ### HANDS — Text Expression Functions
 
 HANDS functions are pure expression helpers for text shaping and checks. They do not mutate SIGILs and are used only inside expressions.

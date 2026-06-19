@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -1315,6 +1316,14 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 			i = next
 			continue
 
+		case TOK_BIND:
+			next, err := execBindJSON(prog, tokens, i, sigils)
+			if err != nil {
+				return "", err
+			}
+			i = next
+			continue
+
 		case TOK_EPHEMERAL:
 			// Two forms:
 			//  1) EPHEMERAL SIGIL name BE <expr>.
@@ -1417,6 +1426,15 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 			continue
 
 		case TOK_IDENT:
+			if strings.EqualFold(tok.Lexeme, "WRITE") {
+				next, err := execWriteJSON(prog, tokens, i, sigils)
+				if err != nil {
+					return "", err
+				}
+				i = next
+				continue
+			}
+
 			switch tok.Lexeme {
 			case "SEND":
 				// SEND BACK ...
@@ -1516,6 +1534,140 @@ func execWork(prog *Program, w *WorkDecl, sigils sigilTable, captureAnswer bool)
 	// Top-level or side-effect-only WORKs are allowed to finish
 	// without an explicit THUS/SEND BACK.
 	return "", nil
+}
+
+// ---------------- MIRRORS / JSON ----------------
+
+func compactJSONText(raw string) (string, error) {
+	var v any
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
+		return "", err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		return "", fmt.Errorf("extra JSON data")
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+func expectLexeme(tokens []Token, i int, word, context string) (int, error) {
+	if i >= len(tokens) || !lexemeIs(tokens[i], word) {
+		if i < len(tokens) {
+			return i, fmt.Errorf("%s: expected %s at %s:%d:%d", context, word, tokens[i].File, tokens[i].Line, tokens[i].Column)
+		}
+		return i, fmt.Errorf("%s: expected %s", context, word)
+	}
+	return i + 1, nil
+}
+
+func expectSigilName(tokens []Token, i int, context string) (string, int, error) {
+	if i < len(tokens) && tokens[i].Type == TOK_SIGIL {
+		i++
+	}
+	if i >= len(tokens) || tokens[i].Type != TOK_IDENT {
+		if i < len(tokens) {
+			return "", i, fmt.Errorf("%s: expected SIGIL name at %s:%d:%d", context, tokens[i].File, tokens[i].Line, tokens[i].Column)
+		}
+		return "", i, fmt.Errorf("%s: expected SIGIL name", context)
+	}
+	return tokens[i].Lexeme, i + 1, nil
+}
+
+// BIND JSON FROM <expr> AS [SIGIL] name.
+func execBindJSON(prog *Program, tokens []Token, i int, sigils sigilTable) (int, error) {
+	startTok := tokens[i]
+	i++
+
+	var err error
+	if i, err = expectLexeme(tokens, i, "JSON", "BIND JSON"); err != nil {
+		return i, err
+	}
+	if i, err = expectLexeme(tokens, i, "FROM", "BIND JSON"); err != nil {
+		return i, err
+	}
+
+	exprStart := i
+	for i < len(tokens) && tokens[i].Type != TOK_AS && tokens[i].Type != TOK_DOT && tokens[i].Type != TOK_NEWLINE && tokens[i].Type != TOK_ENDWORK {
+		i++
+	}
+	if i >= len(tokens) || tokens[i].Type != TOK_AS {
+		return i, fmt.Errorf("BIND JSON: expected AS at %s:%d:%d", startTok.File, startTok.Line, startTok.Column)
+	}
+
+	val, err := evalStringExpr(prog, tokens[exprStart:i], sigils)
+	if err != nil {
+		return i, fmt.Errorf("BIND JSON: expression error: %v", err)
+	}
+	compact, err := compactJSONText(val)
+	if err != nil {
+		return i, &omenError{name: "invalid_json"}
+	}
+
+	i++ // AS
+	name, next, err := expectSigilName(tokens, i, "BIND JSON")
+	if err != nil {
+		return next, err
+	}
+	i = next
+	setSigil(sigils, name, compact)
+
+	if i < len(tokens) && tokens[i].Type == TOK_DOT {
+		i++
+	}
+	return i, nil
+}
+
+// WRITE JSON <expr> AS TEXT INTO SIGIL name.
+func execWriteJSON(prog *Program, tokens []Token, i int, sigils sigilTable) (int, error) {
+	startTok := tokens[i]
+	i++
+
+	var err error
+	if i, err = expectLexeme(tokens, i, "JSON", "WRITE JSON"); err != nil {
+		return i, err
+	}
+
+	exprStart := i
+	for i < len(tokens) && tokens[i].Type != TOK_AS && tokens[i].Type != TOK_DOT && tokens[i].Type != TOK_NEWLINE && tokens[i].Type != TOK_ENDWORK {
+		i++
+	}
+	if i >= len(tokens) || tokens[i].Type != TOK_AS {
+		return i, fmt.Errorf("WRITE JSON: expected AS at %s:%d:%d", startTok.File, startTok.Line, startTok.Column)
+	}
+
+	val, err := evalStringExpr(prog, tokens[exprStart:i], sigils)
+	if err != nil {
+		return i, fmt.Errorf("WRITE JSON: expression error: %v", err)
+	}
+	compact, err := compactJSONText(val)
+	if err != nil {
+		return i, &omenError{name: "invalid_json"}
+	}
+
+	i++ // AS
+	if i, err = expectLexeme(tokens, i, "TEXT", "WRITE JSON"); err != nil {
+		return i, err
+	}
+	if i, err = expectLexeme(tokens, i, "INTO", "WRITE JSON"); err != nil {
+		return i, err
+	}
+	name, next, err := expectSigilName(tokens, i, "WRITE JSON")
+	if err != nil {
+		return next, err
+	}
+	i = next
+	setSigil(sigils, name, compact)
+
+	if i < len(tokens) && tokens[i].Type == TOK_DOT {
+		i++
+	}
+	return i, nil
 }
 
 func execSleep(prog *Program, tokens []Token, i int, sigils sigilTable) (int, error) {

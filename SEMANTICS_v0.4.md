@@ -435,3 +435,15 @@ Predicate functions return boolean values: CONTAINS, STARTS_WITH, ENDS_WITH.
 
 HANDS functions are expression-only and do not introduce parser-level statements or collection semantics.
 
+13. MIRRORS Runtime Semantics
+
+The v0.4 MIRRORS runtime stores JSON as canonical compact text in SIGILs.
+
+BIND JSON FROM <expr> AS [SIGIL] name evaluates <expr>, validates it with the runtime JSON parser, compacts it, and assigns the compact text to name.
+
+WRITE JSON <expr> AS TEXT INTO SIGIL name evaluates <expr>, validates and compacts it, and writes the compact text to name.
+
+Invalid JSON produces the stable OMEN name invalid_json.
+
+No JSON object graph is exposed to user code in this phase. Field access, mutation, LIST, COLLECTION, FILE, HTTP client, VM, analyzer, SPLIT, and JOIN semantics are outside this runtime patch.
+

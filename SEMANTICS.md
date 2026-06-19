@@ -539,3 +539,19 @@ ENDS_WITH(text, suffix) returns true if text ends with suffix.
 
 HANDS does not define LIST, COLLECTION, SPLIT, JOIN, FIELD, OBSERVE, FRAME, JSON, FILE, or HTTP behavior.
 
+14. MIRRORS Minimal JSON
+
+MIRRORS provides minimal JSON validation and text serialization.
+
+Supported forms:
+
+BIND JSON FROM <expr> AS [SIGIL] name.
+
+WRITE JSON <expr> AS TEXT INTO SIGIL name.
+
+Both forms evaluate the source expression as text, validate it as JSON, compact it into canonical JSON text, and store that text in the target SIGIL.
+
+Invalid JSON raises the stable OMEN name invalid_json.
+
+MIRRORS does not define an object model, field access, JSON mutation, LIST, COLLECTION, FILE, HTTP client, FIELD, OBSERVE, FRAME, VM, analyzer, SPLIT, or JOIN behavior.
+

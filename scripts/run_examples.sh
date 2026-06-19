@@ -29,6 +29,7 @@ examples=(
   "send_back_demo.sic"
   "expr_demo.sic"
   "hands_demo.sic"
+  "mirrors_demo.sic"
   "invisibility_demo.sic"
   "sealed_demo.sic"
   "choir_isolation_demo.sic"
